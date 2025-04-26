@@ -117,6 +117,19 @@ body {
     background-color: #e9ecef;
     border-radius: 5px;
 }
+/* Style remove button */
+[data-testid="stExpander"] .stButton button {
+    /* You might need more specific selectors if other buttons are affected */
+     /* background-color: #dc3545; /* Red remove button */
+     /* color: white; */
+     /* border-color: #dc3545; */
+}
+[data-testid="stExpander"] .stButton button:hover {
+    /* background-color: #c82333; */
+    /* border-color: #bd2130; */
+    /* color: white; */
+}
+
 
 </style>
 """, unsafe_allow_html=True)
@@ -309,19 +322,14 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
        Uses date/time pickers for timestamp fields.
        Includes Google Maps helper for Location.
     """
+    # (Function remains the same as previous version)
     data = obj_data or {}
     form_values = {}
-
-    # --- Common Fields ---
     name_required = obj_type in ['intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability', 'campaign', 'identity', 'location', 'course-of-action', 'attack-pattern', 'report']
     name_label = "Name (Required)" if name_required else "Name / Value (Optional, used as label)"
     form_values['name'] = st.text_input(name_label, value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
     form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
-
-    # --- Type-Specific Fields ---
     st.subheader(f"{obj_type.replace('-', ' ').title()} Properties")
-
-    # Helper function for date/time input pairs
     def datetime_input(label, data_key, required=False):
         st.markdown(f"**{label}{' (Required)' if required else ''}**")
         default_date, default_time = _parse_stix_timestamp(data.get(data_key))
@@ -329,11 +337,8 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         with col1:
             form_values[f'{data_key}_date'] = st.date_input("Date", value=default_date, key=f"{key_prefix}_{data_key}_date")
         with col2:
-            # Provide a default time if None, otherwise time_input fails
             time_value = default_time if default_time is not None else dt_time(0, 0)
-            form_values[f'{data_key}_time'] = st.time_input("Time (UTC)", value=time_value, key=f"{key_prefix}_{data_key}_time", step=3600) # Step=1 hour
-
-    # Use the helper or direct widgets
+            form_values[f'{data_key}_time'] = st.time_input("Time (UTC)", value=time_value, key=f"{key_prefix}_{data_key}_time", step=3600)
     if obj_type == 'attack-pattern':
         form_values['ap_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_ap_aliases")
         form_values['ap_kill_chain_phases_str'] = st.text_area("Kill Chain Phases (kill_chain_name:phase_name)", value=_kill_chain_to_text(data, 'kill_chain_phases'), key=f"{key_prefix}_ap_kill_chain")
@@ -372,7 +377,6 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['is_primary_motivation'] = st.selectbox("Primary Motivation", options=ATTACK_MOTIVATION_OV, index=ATTACK_MOTIVATION_OV.index(_get_default(data, 'primary_motivation', "")), key=f"{key_prefix}_is_primary_motivation")
         form_values['is_secondary_motivations'] = st.multiselect("Secondary Motivations", options=ATTACK_MOTIVATION_OV[1:], default=data.get('secondary_motivations', []), key=f"{key_prefix}_is_secondary_motivations")
     elif obj_type == 'location':
-         # --- Google Maps Helper ---
          st.markdown("**Location Helper**")
          loc_search_term = st.text_input("Enter Address, Postcode, or Place", key=f"{key_prefix}_loc_search")
          if st.button("Generate Google Maps Link", key=f"{key_prefix}_loc_search_btn"):
@@ -380,10 +384,8 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
                  encoded_term = urllib.parse.quote_plus(loc_search_term)
                  maps_url = f"https://www.google.com/maps/search/?api=1&query={encoded_term}"
                  st.markdown(f'<div class="maps-link-container">Search Link (opens new tab): <a href="{maps_url}" target="_blank">{maps_url}</a></div>', unsafe_allow_html=True)
-             else:
-                 st.warning("Please enter a search term.")
-         st.markdown("---") # Separator
-         # --- Actual Location Fields ---
+             else: st.warning("Please enter a search term.")
+         st.markdown("---")
          form_values['loc_region'] = st.selectbox("Region", options=REGION_OV, index=REGION_OV.index(_get_default(data, 'region', "")), key=f"{key_prefix}_loc_region")
          form_values['loc_country'] = st.text_input("Country (ISO 3166-1 alpha-2)", value=_get_default(data, 'country'), key=f"{key_prefix}_loc_country", help="Use 2-letter country code (e.g., US, GB)")
          form_values['loc_administrative_area'] = st.text_input("Administrative Area (e.g., state)", value=_get_default(data, 'administrative_area'), key=f"{key_prefix}_loc_admin_area")
@@ -978,6 +980,62 @@ with st.sidebar:
         else:
             st.info("Select a single edge (relationship) in the graph to edit its properties.")
 
+    # --- Remove Selected Element (Moved to Sidebar) ---
+    with st.expander("Remove Selected Elements", expanded=False):
+        elements_to_remove_ids = []
+        current_selection = st.session_state.get('current_selection')
+        if current_selection and isinstance(current_selection, dict):
+            selected_nodes_data = current_selection.get("nodes", [])
+            selected_edges_data = current_selection.get("edges", [])
+            if selected_nodes_data:
+                if selected_nodes_data and isinstance(selected_nodes_data[0], dict): elements_to_remove_ids.extend([node['id'] for node in selected_nodes_data])
+                else: elements_to_remove_ids.extend(selected_nodes_data)
+            if selected_edges_data:
+                if selected_edges_data and isinstance(selected_edges_data[0], dict): elements_to_remove_ids.extend([edge['id'] for edge in selected_edges_data])
+                else: elements_to_remove_ids.extend(selected_edges_data)
+        if elements_to_remove_ids:
+            st.write("Currently selected:")
+            for elem_id in elements_to_remove_ids[:5]:
+                 obj = next((o for o in st.session_state.objects if o.get('id') == elem_id), None); label = elem_id
+                 if obj:
+                     obj_type_display = obj.get('type', 'N/A').replace('-', ' ').title()
+                     obj_name_display = obj.get('name', obj.get('value', elem_id))
+                     if obj.get('type') == 'relationship': obj_name_display = f"{obj.get('source_ref', '?')} -> {obj.get('target_ref', '?')}"
+                     label = f"{obj_type_display}: {obj_name_display}"
+                 st.text(f"- {label}")
+            if len(elements_to_remove_ids) > 5: st.text(f"... and {len(elements_to_remove_ids) - 5} more.")
+            st.markdown("---")
+            if st.button(f"Confirm Removal of {len(elements_to_remove_ids)} Element(s)", key="remove_button_sidebar"):
+                num_removed = len(elements_to_remove_ids); ids_being_removed = set(elements_to_remove_ids)
+                for elem_id in elements_to_remove_ids: remove_element(elem_id)
+                st.success(f"Removed {num_removed} element(s).")
+                st.session_state.current_selection = None
+                if st.session_state.editing_object_id in ids_being_removed: st.session_state.editing_object_id = None
+                if st.session_state.editing_relationship_id in ids_being_removed: st.session_state.editing_relationship_id = None
+                st.rerun()
+        else: st.info("Click elements in the graph to select them for removal.")
+
+    # --- Export STIX bundle (Moved to Sidebar) ---
+    with st.expander("Export Bundle", expanded=False):
+        if st.button("Generate & Download STIX 2.1 Bundle"):
+            if not st.session_state.objects: st.warning("No objects to export.")
+            else:
+                try:
+                    bundle_objects_for_export = []
+                    for obj in st.session_state.objects:
+                         obj_copy = obj.copy()
+                         if 'spec_version' not in obj_copy: obj_copy['spec_version'] = '2.1'
+                         bundle_objects_for_export.append(obj_copy)
+                    bundle_to_export = Bundle(objects=bundle_objects_for_export, allow_custom=True)
+                    output = bundle_to_export.serialize(pretty=True)
+                    st.download_button(label="Download Bundle JSON", data=output, file_name="stix_bundle.json", mime="application/json", key="download_bundle_button")
+                except Exception as e: st.error(f"Error exporting bundle: {e}")
+
+    # --- Display Raw Objects (Moved to Sidebar) ---
+    with st.expander("Show Raw STIX Objects", expanded=False):
+         if st.session_state.objects: st.json(st.session_state.objects)
+         else: st.info("No objects currently in session state.")
+
 
 # --- Main Area Content ---
 
@@ -1018,68 +1076,9 @@ else:
     )
 
 # --- Sections below the graph (conditionally rendered) ---
-if not st.session_state.fullscreen_mode:
-    # --- Remove Selected Element ---
-    # (Remove logic remains the same)
-    st.markdown("---")
-    st.subheader("Remove Selected Elements")
-    elements_to_remove_ids = []
-    if selected and isinstance(selected, dict):
-        selected_nodes_data = selected.get("nodes", [])
-        selected_edges_data = selected.get("edges", [])
-        if selected_nodes_data:
-            if selected_nodes_data and isinstance(selected_nodes_data[0], dict): elements_to_remove_ids.extend([node['id'] for node in selected_nodes_data])
-            else: elements_to_remove_ids.extend(selected_nodes_data)
-        if selected_edges_data:
-            if selected_edges_data and isinstance(selected_edges_data[0], dict): elements_to_remove_ids.extend([edge['id'] for edge in selected_edges_data])
-            else: elements_to_remove_ids.extend(selected_edges_data)
-    if elements_to_remove_ids:
-        st.write("Currently selected:")
-        num_cols = min(len(elements_to_remove_ids), 4); cols = st.columns(num_cols); col_idx = 0
-        for elem_id in elements_to_remove_ids:
-             obj = next((o for o in st.session_state.objects if o.get('id') == elem_id), None); label = elem_id
-             if obj:
-                 obj_type_display = obj.get('type', 'N/A').replace('-', ' ').title()
-                 obj_name_display = obj.get('name', obj.get('value', elem_id))
-                 if obj.get('type') == 'relationship': obj_name_display = f"{obj.get('source_ref', '?')} -> {obj.get('target_ref', '?')}"
-                 elif len(obj_name_display) > 40 and obj_name_display.startswith(obj.get('type', '')): obj_name_display = obj_name_display[:15] + "..." + obj_name_display[-15:]
-                 elif len(obj_name_display) > 40: obj_name_display = obj_name_display[:37] + "..."
-                 label = f"{obj_type_display}: {obj_name_display}"
-             with cols[col_idx % num_cols]:
-                  st.markdown(f"<div class='selected-node-main'><span class='selected-node-label-main'>ID:</span> {elem_id}<br><span class='selected-node-label-main'>Label:</span> {label}</div>", unsafe_allow_html=True)
-             col_idx += 1
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button(f"Confirm Removal of {len(elements_to_remove_ids)} Element(s)", key="remove_button_main"):
-            num_removed = len(elements_to_remove_ids); ids_being_removed = set(elements_to_remove_ids)
-            for elem_id in elements_to_remove_ids: remove_element(elem_id)
-            st.success(f"Removed {num_removed} element(s) and their connected relationships.")
-            st.session_state.current_selection = None
-            if st.session_state.editing_object_id in ids_being_removed: st.session_state.editing_object_id = None
-            if st.session_state.editing_relationship_id in ids_being_removed: st.session_state.editing_relationship_id = None
-            st.rerun()
-    else: st.info("Click one or more elements in the graph to select them for removal.")
-
-    # --- Export STIX bundle ---
-    # (Export logic remains the same)
-    st.header("Export")
-    if st.button("Export STIX 2.1 Bundle"):
-        if not st.session_state.objects: st.warning("No objects to export.")
-        else:
-            try:
-                bundle_objects_for_export = []
-                for obj in st.session_state.objects:
-                     obj_copy = obj.copy()
-                     if 'spec_version' not in obj_copy: obj_copy['spec_version'] = '2.1'
-                     bundle_objects_for_export.append(obj_copy)
-                bundle_to_export = Bundle(objects=bundle_objects_for_export, allow_custom=True)
-                output = bundle_to_export.serialize(pretty=True)
-                st.download_button(label="Download Bundle JSON", data=output, file_name="stix_bundle.json", mime="application/json")
-            except Exception as e: st.error(f"Error exporting bundle: {e}")
-
-    # --- Display Raw Objects ---
-    with st.expander("Show Raw STIX Objects in Session State"):
-         if st.session_state.objects: st.json(st.session_state.objects)
-         else: st.info("No objects currently in session state.")
+# Remove/Export moved to sidebar. Raw Objects also moved.
+# if not st.session_state.fullscreen_mode:
+#     pass
 
 
 # --- Process Selection Update (Always run this logic) ---
