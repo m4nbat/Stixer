@@ -1,3 +1,3 @@
 # Stixer
 
-An app for creating, importing, editing and exporting STIX 2.1 graphs
+An app for creating, importing, editing and exporting STIX 2.1 objects and graphs
