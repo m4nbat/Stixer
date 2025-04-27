@@ -9,7 +9,7 @@ import streamlit as st
 # Ensure necessary STIX classes are imported (or rely on generic parsing)
 from stix2 import (Bundle, parse, AttackPattern, Campaign, CourseOfAction, Identity,
                    Indicator, Infrastructure, IntrusionSet, Location, Malware, Note,
-                   ObservedData, Report, ThreatActor, Tool, Vulnerability)
+                   ObservedData, Report, ThreatActor, Tool, Vulnerability,MalwareAnalysis)
 from stix2.exceptions import InvalidValueError
 import uuid
 import json
@@ -98,6 +98,7 @@ KILL_CHAIN_PHASES = {
 }
 INFRASTRUCTURE_TYPES_OV = ["", "amplification", "anonymization", "botnet", "command-and-control", "exfiltration", "hosting-malware", "hosting-target-lists", "phishing", "reconnaissance", "staging", "unknown"]
 PATTERN_TYPES_OV = ["stix", "pcre", "sigma", "snort", "suricata", "yara"] # For Indicator
+MALWARE_AV_RESULT_OV = ["", "malicious", "suspicious", "benign", "unknown"] # For Malware Analysis
 
 # Define Object Types List (Add software)
 source_types = set(k[0] for k in HARDCODED_VALID_RELATIONSHIPS.keys())
@@ -121,7 +122,7 @@ TYPE_TO_CLASS_MAPPING = {
     'identity': Identity, 'indicator': Indicator, 'infrastructure': Infrastructure,
     'intrusion-set': IntrusionSet, 'location': Location, 'malware': Malware, 'note': Note,
     'observed-data': ObservedData, 'report': Report, 'threat-actor': ThreatActor,
-    'tool': Tool, 'vulnerability': Vulnerability
+    'tool': Tool, 'vulnerability': Vulnerability, 'malware-analysis': MalwareAnalysis # Added MA
     # SCOs like x509-certificate, domain-name, software will use generic parsing with allow_custom=True
 }
 
@@ -387,6 +388,20 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['mal_implementation_languages_str'] = st.text_area("Implementation Languages (e.g., c++)", value=_list_to_text(data, 'implementation_languages'), key=f"{key_prefix}_mal_langs")
          form_values['mal_capabilities_str'] = st.text_area("Capabilities (one per line)", value=_list_to_text(data, 'capabilities'), key=f"{key_prefix}_mal_caps")
          form_values['mal_sample_refs_str'] = st.text_area("Sample Refs (STIX IDs, one per line)", value=_list_to_text(data, 'sample_refs'), key=f"{key_prefix}_mal_samples")
+    elif obj_type == 'malware-analysis':
+        form_values['ma_product'] = st.text_input("Product (Required)", value=_get_default(data, 'product'), key=f"{key_prefix}_ma_product")
+        form_values['ma_version'] = st.text_input("Product Version", value=_get_default(data, 'version'), key=f"{key_prefix}_ma_version")
+        form_values['ma_host_vm_ref'] = st.text_input("Host VM Ref (Software ID)", value=_get_default(data, 'host_vm_ref'), key=f"{key_prefix}_ma_host_vm")
+        form_values['ma_operating_system_ref'] = st.text_input("Operating System Ref (Software ID)", value=_get_default(data, 'operating_system_ref'), key=f"{key_prefix}_ma_os")
+        form_values['ma_installed_software_refs_str'] = st.text_area("Installed Software Refs (Software IDs, one per line)", value=_list_to_text(data, 'installed_software_refs'), key=f"{key_prefix}_ma_inst_sw")
+        form_values['ma_configuration_version'] = st.text_input("Configuration Version", value=_get_default(data, 'configuration_version'), key=f"{key_prefix}_ma_config")
+        form_values['ma_modules_str'] = st.text_area("Modules (one per line)", value=_list_to_text(data, 'modules'), key=f"{key_prefix}_ma_modules")
+        form_values['ma_analysis_engine_version'] = st.text_input("Analysis Engine Version", value=_get_default(data, 'analysis_engine_version'), key=f"{key_prefix}_ma_engine_ver")
+        form_values['ma_analysis_definition_version'] = st.text_input("Analysis Definition Version", value=_get_default(data, 'analysis_definition_version'), key=f"{key_prefix}_ma_def_ver")
+        datetime_input("Submitted", "submitted"); datetime_input("Analysis Started", "analysis_started"); datetime_input("Analysis Ended", "analysis_ended")
+        form_values['ma_av_result'] = st.selectbox("AV Result", options=MALWARE_AV_RESULT_OV, index=MALWARE_AV_RESULT_OV.index(_get_default(data, 'av_result', "")), key=f"{key_prefix}_ma_av_result")
+        form_values['ma_analysis_sco_refs_str'] = st.text_area("Analysis SCO Refs (STIX IDs, one per line)", value=_list_to_text(data, 'analysis_sco_refs'), key=f"{key_prefix}_ma_sco_refs")
+        st.caption("Note: Either AV Result or Analysis SCO Refs must be provided.")
     elif obj_type == 'note': # UPDATED
         form_values['note_abstract'] = st.text_area("Abstract", value=_get_default(data, 'abstract'), key=f"{key_prefix}_note_abstract")
         form_values['note_content'] = st.text_area("Content (Required)", value=_get_default(data, 'content'), key=f"{key_prefix}_note_content")
@@ -543,6 +558,21 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('mal_implementation_languages_str'): obj_args['implementation_languages'] = parse_text_area(form_data['mal_implementation_languages_str'])
         if form_data.get('mal_capabilities_str'): obj_args['capabilities'] = parse_text_area(form_data['mal_capabilities_str'])
         if form_data.get('mal_sample_refs_str'): obj_args['sample_refs'] = parse_text_area(form_data['mal_sample_refs_str'])
+    elif obj_type == 'malware-analysis': # UPDATED
+        if form_data.get('ma_product'): obj_args['product'] = form_data['ma_product'] # Required
+        if form_data.get('ma_version'): obj_args['version'] = form_data['ma_version']
+        if form_data.get('ma_host_vm_ref'): obj_args['host_vm_ref'] = form_data['ma_host_vm_ref']
+        if form_data.get('ma_operating_system_ref'): obj_args['operating_system_ref'] = form_data['ma_operating_system_ref']
+        if form_data.get('ma_installed_software_refs_str'): obj_args['installed_software_refs'] = parse_text_area(form_data['ma_installed_software_refs_str'])
+        if form_data.get('ma_configuration_version'): obj_args['configuration_version'] = form_data['ma_configuration_version']
+        if form_data.get('ma_modules_str'): obj_args['modules'] = parse_text_area(form_data['ma_modules_str'])
+        if form_data.get('ma_analysis_engine_version'): obj_args['analysis_engine_version'] = form_data['ma_analysis_engine_version']
+        if form_data.get('ma_analysis_definition_version'): obj_args['analysis_definition_version'] = form_data['ma_analysis_definition_version']
+        ts = format_stix_timestamp(form_data.get('submitted_date'), form_data.get('submitted_time')); obj_args.update({'submitted': ts} if ts else {})
+        ts = format_stix_timestamp(form_data.get('analysis_started_date'), form_data.get('analysis_started_time')); obj_args.update({'analysis_started': ts} if ts else {})
+        ts = format_stix_timestamp(form_data.get('analysis_ended_date'), form_data.get('analysis_ended_time')); obj_args.update({'analysis_ended': ts} if ts else {})
+        if form_data.get('ma_av_result'): obj_args['av_result'] = form_data['ma_av_result']
+        if form_data.get('ma_analysis_sco_refs_str'): obj_args['analysis_sco_refs'] = parse_text_area(form_data['ma_analysis_sco_refs_str'])
     elif obj_type == 'note': # UPDATED
         if form_data.get('note_abstract'): obj_args['abstract'] = form_data['note_abstract']
         if form_data.get('note_content'): obj_args['content'] = form_data['note_content'] # Required
@@ -666,6 +696,7 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         'observed-data': ['first_observed', 'last_observed', 'number_observed', 'object_refs'],
         'report': ['name', 'report_types', 'published', 'object_refs'],
         'threat-actor': ['threat_actor_types'],
+        'malware-analysis': ['product'], # Added MA requirement
         'x509-certificate': [],
         'domain-name': ['value'],
         'software': ['name'] # Name is required for software
@@ -805,6 +836,15 @@ with st.sidebar:
                     validation_passed = False
                 if add_obj_type == 'software' and not add_form_data.get('name'):
                     error_messages.append("Software 'Name' is required.")
+                    validation_passed = False
+                if add_obj_type == 'course-of-action' and not add_form_data.get('name'): # Added CoA validation
+                    error_messages.append("Course of Action 'Name' is required.")
+                    validation_passed = False
+                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_product'): # Added MA validation
+                    error_messages.append("Malware Analysis 'Product' is required.")
+                    validation_passed = False
+                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_av_result') and not add_form_data.get('ma_analysis_sco_refs_str'): # Added MA validation
+                    error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'.")
                     validation_passed = False
                 # --- End Validation ---
                 if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
