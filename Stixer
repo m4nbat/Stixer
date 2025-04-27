@@ -6,7 +6,10 @@
 # Run: python -m streamlit run your_script_name.py
 
 import streamlit as st
-from stix2 import Bundle, parse, AttackPattern, Campaign, CourseOfAction, Identity, Indicator, Infrastructure, IntrusionSet, Location, Malware, Note, ObservedData, Report, ThreatActor, Tool, Vulnerability
+# Ensure necessary STIX classes are imported (or rely on generic parsing)
+from stix2 import (Bundle, parse, AttackPattern, Campaign, CourseOfAction, Identity,
+                   Indicator, Infrastructure, IntrusionSet, Location, Malware, Note,
+                   ObservedData, Report, ThreatActor, Tool, Vulnerability)
 from stix2.exceptions import InvalidValueError
 import uuid
 import json
@@ -25,7 +28,7 @@ st.set_page_config(page_title="Stixer by Manb4t", layout="wide")
 
 # --- Vocabularies & Mappings (Define BEFORE Session State) ---
 
-# Hardcoded Relationship Rules
+# Hardcoded Relationship Rules (Keep as is)
 HARDCODED_VALID_RELATIONSHIPS = {
     ('attack-pattern', 'malware'): ['delivers', 'uses'], ('attack-pattern', 'identity'): ['targets'],
     ('attack-pattern', 'location'): ['targets'], ('attack-pattern', 'vulnerability'): ['targets'],
@@ -67,9 +70,12 @@ HARDCODED_VALID_RELATIONSHIPS = {
     ('threat-actor', 'tool'): ['uses'], ('tool', 'malware'): ['delivers', 'drops'],
     ('tool', 'vulnerability'): ['has', 'targets'], ('tool', 'identity'): ['targets'],
     ('tool', 'infrastructure'): ['targets'], ('tool', 'location'): ['targets'],
+    ('domain-name', 'domain-name'): ['resolves-to'],
+    ('domain-name', 'ipv4-addr'): ['resolves-to'],
+    ('domain-name', 'ipv6-addr'): ['resolves-to'],
 }
 
-# Vocabularies
+# Vocabularies (Keep as is)
 THREAT_ACTOR_TYPES_OV = ["", "activist", "competitor", "crime-syndicate", "criminal", "hacker", "insider-accidental", "insider-disgruntled", "nation-state", "sensationalist", "spy", "terrorist", "unknown"]
 THREAT_ACTOR_ROLES_OV = ["", "agent", "director", "independent", "infrastructure-architect", "infrastructure-operator", "malware-author", "sponsor"]
 THREAT_ACTOR_SOPHISTICATION_OV = ["", "none", "minimal", "intermediate", "advanced", "expert", "innovator", "strategic"]
@@ -90,8 +96,10 @@ KILL_CHAIN_PHASES = {
     "mitre-attack": ["reconnaissance", "resource-development", "initial-access", "execution", "persistence", "privilege-escalation", "defense-evasion", "credential-access", "discovery", "lateral-movement", "collection", "command-and-control", "exfiltration", "impact"],
     "unified-kill-chain": ["in", "through", "out"]
 }
+INFRASTRUCTURE_TYPES_OV = ["", "amplification", "anonymization", "botnet", "command-and-control", "exfiltration", "hosting-malware", "hosting-target-lists", "phishing", "reconnaissance", "staging", "unknown"]
+PATTERN_TYPES_OV = ["stix", "pcre", "sigma", "snort", "suricata", "yara"] # For Indicator
 
-# Define Object Types List
+# Define Object Types List (Add software)
 source_types = set(k[0] for k in HARDCODED_VALID_RELATIONSHIPS.keys())
 target_types = set(k[1] for k in HARDCODED_VALID_RELATIONSHIPS.keys())
 hardcoded_types = source_types.union(target_types)
@@ -102,17 +110,19 @@ standard_types = [
     'location','note','marking-definition', 'language-content',
     'directory', 'domain-name', 'email-addr', 'email-message', 'file',
     'ipv4-addr', 'ipv6-addr', 'mac-addr', 'mutex', 'network-traffic',
-    'process', 'software', 'url', 'user-account', 'windows-registry-key', 'x509-certificate'
+    'process', 'software', 'url', 'user-account', 'windows-registry-key', # Added software
+    'x509-certificate'
 ]
 ALL_OBJECT_TYPES = sorted(list(set(standard_types).union(hardcoded_types)))
 
-# Map STIX types to their respective classes
+# Map STIX types to their respective classes (SCOs handled via dict)
 TYPE_TO_CLASS_MAPPING = {
     'attack-pattern': AttackPattern, 'campaign': Campaign, 'course-of-action': CourseOfAction,
     'identity': Identity, 'indicator': Indicator, 'infrastructure': Infrastructure,
     'intrusion-set': IntrusionSet, 'location': Location, 'malware': Malware, 'note': Note,
     'observed-data': ObservedData, 'report': Report, 'threat-actor': ThreatActor,
     'tool': Tool, 'vulnerability': Vulnerability
+    # SCOs like x509-certificate, domain-name, software will use generic parsing with allow_custom=True
 }
 
 # --- Session State Initialization ---
@@ -128,9 +138,12 @@ if 'uploaded_file_state' not in st.session_state: st.session_state.uploaded_file
 if 'fullscreen_mode' not in st.session_state: st.session_state.fullscreen_mode = False
 if 'editing_object_id' not in st.session_state: st.session_state.editing_object_id = None
 if 'editing_relationship_id' not in st.session_state: st.session_state.editing_relationship_id = None
+# State to store generated map URL to display after form submission
+if 'map_url_to_display' not in st.session_state: st.session_state.map_url_to_display = None
 
 
 # --- Styling (Simplified - Light Theme Only) ---
+# (Keep existing styles)
 st.markdown("""
 <style>
 /* Basic Light Theme Styles */
@@ -235,6 +248,11 @@ def _kill_chain_to_text(data, key):
     phases = data.get(key, [])
     return "\n".join([f"{p.get('kill_chain_name', '')}:{p.get('phase_name', '')}" for p in phases])
 
+def _hashes_to_text(hashes_dict):
+    """Converts a hashes dictionary to a multiline string."""
+    if not hashes_dict or not isinstance(hashes_dict, dict): return ""
+    return "\n".join([f"{algo}:{h}" for algo, h in hashes_dict.items()])
+
 def _ext_ref_hashes_to_text(ext_refs):
     if not ext_refs or not isinstance(ext_refs, list) or not ext_refs[0].get("hashes"): return ""
     hashes_dict = ext_refs[0].get("hashes", {})
@@ -244,19 +262,40 @@ def _parse_stix_timestamp(timestamp_str):
     if not timestamp_str or not isinstance(timestamp_str, str): return None, None
     try:
         dt_obj = isoparse(timestamp_str)
+        if dt_obj.tzinfo is None: dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+        else: dt_obj = dt_obj.astimezone(timezone.utc)
         return dt_obj.date(), dt_obj.time().replace(tzinfo=None)
     except ValueError: return None, None
 
+def generate_maps_link(lat, lon):
+    """Generates a Google Maps link from latitude and longitude."""
+    try:
+        lat_f = float(lat); lon_f = float(lon)
+        return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
+    except (ValueError, TypeError, AttributeError): return None
+
 def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     """Generates Streamlit form widgets for a given STIX object type."""
-    # (Function remains the same as previous version - Kill Chain fix applied)
     data = obj_data or {}
     form_values = {}
-    name_required = obj_type in ['intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability', 'campaign', 'identity', 'location', 'course-of-action', 'attack-pattern', 'report']
-    name_label = "Name (Required)" if name_required else "Name / Value"
-    form_values['name'] = st.text_input(name_label, value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
-    form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
+    # --- Handle objects without 'name' or 'description' ---
+    if obj_type in ['x509-certificate', 'domain-name', 'note', 'software']: # Added software
+        display_label = _get_default(data, 'value', _get_default(data, 'serial_number', _get_default(data, 'subject', _get_default(data, 'abstract', _get_default(data, 'name', f"New {obj_type}"))))) # Software uses 'name'
+        st.markdown(f"**{obj_type.replace('-', ' ').title()}:** {display_label}")
+        # Software has name/desc, but let's handle it below
+        if obj_type not in ['software']: # Don't show generic name/desc for cert, domain, note
+            pass
+        else: # Show name/desc for Software
+            form_values['name'] = st.text_input("Name (Required)", value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
+            form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
+    else: # SDOs that typically have name/description
+        name_required = obj_type in ['intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability', 'campaign', 'identity', 'location', 'course-of-action', 'attack-pattern', 'report']
+        name_label = "Name (Required)" if name_required else "Name / Value"
+        form_values['name'] = st.text_input(name_label, value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
+        form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
+
     st.subheader(f"{obj_type.replace('-', ' ').title()} Properties")
+
     def datetime_input(label, data_key, required=False):
         st.markdown(f"**{label}{' (Required)' if required else ''}**")
         default_date, default_time = _parse_stix_timestamp(data.get(data_key))
@@ -264,8 +303,8 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         with col1: form_values[f'{data_key}_date'] = st.date_input("Date", value=default_date, key=f"{key_prefix}_{data_key}_date")
         with col2: form_values[f'{data_key}_time'] = st.time_input("Time (UTC)", value=default_time or dt_time(0, 0), key=f"{key_prefix}_{data_key}_time", step=3600)
 
-    # --- Kill Chain Input Helper (Revised Logic - No on_change in form) ---
     def kill_chain_input(data_key_prefix):
+        # (Keep existing kill chain logic)
         st.markdown("**Kill Chain Phase (Optional - Select One)**")
         kc_name_widget_key = f"{key_prefix}_{data_key_prefix}_kc_name_widget"
         custom_kc_name_widget_key = f"{key_prefix}_{data_key_prefix}_custom_kc_name_input"
@@ -300,7 +339,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     if obj_type == 'attack-pattern':
         form_values['ap_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_ap_aliases")
         kill_chain_input("ap")
-    elif obj_type == 'campaign':
+    elif obj_type == 'campaign': # UPDATED
         form_values['c_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_c_aliases")
         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
         form_values['c_objective'] = st.text_area("Objective", value=_get_default(data, 'objective'), key=f"{key_prefix}_c_objective")
@@ -308,18 +347,18 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['id_identity_class'] = st.selectbox("Identity Class", options=IDENTITY_CLASS_OV, index=IDENTITY_CLASS_OV.index(_get_default(data, 'identity_class', "")), key=f"{key_prefix}_id_class")
         form_values['id_sectors'] = st.multiselect("Sectors", options=INDUSTRY_SECTOR_OV[1:], default=data.get('sectors', []), key=f"{key_prefix}_id_sectors")
         form_values['id_contact_information'] = st.text_input("Contact Information", value=_get_default(data, 'contact_information'), key=f"{key_prefix}_id_contact")
-    elif obj_type == 'indicator':
+    elif obj_type == 'indicator': # UPDATED
         form_values['ind_indicator_types'] = st.multiselect("Indicator Types", options=INDICATOR_TYPES_OV[1:], default=data.get('indicator_types', []), key=f"{key_prefix}_ind_types")
-        patt_types = ["stix", "pcre", "sigma", "snort", "suricata", "yara"]; form_values['ind_pattern_type'] = st.selectbox("Pattern Type (Required)", options=patt_types, index=patt_types.index(_get_default(data, 'pattern_type', "stix")), key=f"{key_prefix}_ind_patt_type")
+        form_values['ind_pattern_type'] = st.selectbox("Pattern Type (Required)", options=PATTERN_TYPES_OV, index=PATTERN_TYPES_OV.index(_get_default(data, 'pattern_type', "stix")), key=f"{key_prefix}_ind_patt_type")
         form_values['ind_pattern'] = st.text_area("Pattern (Required)", value=_get_default(data, 'pattern'), key=f"{key_prefix}_ind_pattern")
         datetime_input("Valid From", "valid_from", required=True); datetime_input("Valid Until", "valid_until")
         kill_chain_input("ind")
-    elif obj_type == 'infrastructure':
-         infra_types = ["amplification", "anonymization", "botnet", "command-and-control", "exfiltration", "hosting-malware", "hosting-target-lists", "phishing", "reconnaissance", "staging", "unknown"]; form_values['inf_infrastructure_types'] = st.multiselect("Infrastructure Types", options=infra_types, default=data.get('infrastructure_types', []), key=f"{key_prefix}_inf_types")
-         form_values['inf_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_inf_aliases")
-         kill_chain_input("inf")
-         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
-    elif obj_type == 'intrusion-set':
+    elif obj_type == 'infrastructure': # UPDATED
+        form_values['inf_infrastructure_types'] = st.multiselect("Infrastructure Types", options=INFRASTRUCTURE_TYPES_OV[1:], default=data.get('infrastructure_types', []), key=f"{key_prefix}_inf_types")
+        form_values['inf_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_inf_aliases")
+        kill_chain_input("inf")
+        datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
+    elif obj_type == 'intrusion-set': # UPDATED
         form_values['is_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_is_aliases")
         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
         form_values['is_goals_str'] = st.text_area("Goals (one per line)", value=_list_to_text(data, 'goals'), key=f"{key_prefix}_is_goals")
@@ -327,11 +366,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['is_primary_motivation'] = st.selectbox("Primary Motivation", options=ATTACK_MOTIVATION_OV, index=ATTACK_MOTIVATION_OV.index(_get_default(data, 'primary_motivation', "")), key=f"{key_prefix}_is_primary_motivation")
         form_values['is_secondary_motivations'] = st.multiselect("Secondary Motivations", options=ATTACK_MOTIVATION_OV[1:], default=data.get('secondary_motivations', []), key=f"{key_prefix}_is_secondary_motivations")
     elif obj_type == 'location':
-         st.markdown("**Location Helper**"); loc_search_term = st.text_input("Enter Address, Postcode, or Place", key=f"{key_prefix}_loc_search")
-         if st.button("Generate Google Maps Link", key=f"{key_prefix}_loc_search_btn"):
-             if loc_search_term: encoded_term = urllib.parse.quote_plus(loc_search_term); maps_url = f"https://www.google.com/maps/search/?api=1&query={encoded_term}"; st.markdown(f'<div class="maps-link-container">Search Link (opens new tab): <a href="{maps_url}" target="_blank">{maps_url}</a></div>', unsafe_allow_html=True)
-             else: st.warning("Please enter a search term.")
-         st.markdown("---")
+         # --- REMOVED st.button for maps link from here ---
          form_values['loc_region'] = st.selectbox("Region", options=REGION_OV, index=REGION_OV.index(_get_default(data, 'region', "")), key=f"{key_prefix}_loc_region")
          form_values['loc_country'] = st.text_input("Country (ISO 3166-1 alpha-2)", value=_get_default(data, 'country'), key=f"{key_prefix}_loc_country", help="Use 2-letter country code (e.g., US, GB)")
          form_values['loc_administrative_area'] = st.text_input("Administrative Area (e.g., state)", value=_get_default(data, 'administrative_area'), key=f"{key_prefix}_loc_admin_area")
@@ -341,7 +376,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['loc_latitude'] = st.number_input("Latitude", value=data.get('latitude'), format="%.6f", key=f"{key_prefix}_loc_lat", help="e.g., 48.8584")
          form_values['loc_longitude'] = st.number_input("Longitude", value=data.get('longitude'), format="%.6f", key=f"{key_prefix}_loc_lon", help="e.g., 2.2945")
          form_values['loc_precision'] = st.number_input("Precision (meters)", value=data.get('precision'), min_value=0.0, format="%.1f", key=f"{key_prefix}_loc_prec")
-    elif obj_type == 'malware':
+    elif obj_type == 'malware': # UPDATED
          form_values['mal_malware_types'] = st.multiselect("Malware Types", options=MALWARE_TYPES_OV[1:], default=data.get('malware_types', []), key=f"{key_prefix}_mal_types")
          form_values['mal_is_family'] = st.checkbox("Is Family?", value=data.get('is_family', False), key=f"{key_prefix}_mal_is_family")
          form_values['mal_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_mal_aliases")
@@ -352,18 +387,20 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['mal_implementation_languages_str'] = st.text_area("Implementation Languages (e.g., c++)", value=_list_to_text(data, 'implementation_languages'), key=f"{key_prefix}_mal_langs")
          form_values['mal_capabilities_str'] = st.text_area("Capabilities (one per line)", value=_list_to_text(data, 'capabilities'), key=f"{key_prefix}_mal_caps")
          form_values['mal_sample_refs_str'] = st.text_area("Sample Refs (STIX IDs, one per line)", value=_list_to_text(data, 'sample_refs'), key=f"{key_prefix}_mal_samples")
-    elif obj_type == 'note':
-         form_values['note_content'] = st.text_area("Content (Required)", value=_get_default(data, 'content'), key=f"{key_prefix}_note_content")
-         form_values['note_authors_str'] = st.text_area("Authors (one per line)", value=_list_to_text(data, 'authors'), key=f"{key_prefix}_note_authors")
-         form_values['note_object_refs_str'] = st.text_area("Object Refs (Required, STIX IDs one per line)", value=_list_to_text(data, 'object_refs'), key=f"{key_prefix}_note_obj_refs")
+    elif obj_type == 'note': # UPDATED
+        form_values['note_abstract'] = st.text_area("Abstract", value=_get_default(data, 'abstract'), key=f"{key_prefix}_note_abstract")
+        form_values['note_content'] = st.text_area("Content (Required)", value=_get_default(data, 'content'), key=f"{key_prefix}_note_content")
+        form_values['note_authors_str'] = st.text_area("Authors (one per line)", value=_list_to_text(data, 'authors'), key=f"{key_prefix}_note_authors")
+        form_values['note_object_refs_str'] = st.text_area("Object Refs (Required, STIX IDs one per line)", value=_list_to_text(data, 'object_refs'), key=f"{key_prefix}_note_obj_refs")
     elif obj_type == 'observed-data':
         datetime_input("First Observed", "first_observed", required=True); datetime_input("Last Observed", "last_observed", required=True)
         form_values['obs_number_observed'] = st.number_input("Number Observed (Required)", min_value=1, value=data.get('number_observed', 1), key=f"{key_prefix}_obs_num")
         form_values['obs_object_refs_str'] = st.text_area("Object Refs (Required, STIX IDs one per line)", value=_list_to_text(data, 'object_refs'), key=f"{key_prefix}_obs_obj_refs", help="IDs of SCOs or SROs observed")
-    elif obj_type == 'report':
-         form_values['rep_report_types'] = st.multiselect("Report Types (Required)", options=REPORT_TYPES_OV[1:], default=data.get('report_types', []), key=f"{key_prefix}_rep_types")
-         datetime_input("Published Date", "published", required=True)
-         form_values['rep_object_refs_str'] = st.text_area("Object Refs (Required, STIX IDs one per line)", value=_list_to_text(data, 'object_refs'), key=f"{key_prefix}_rep_obj_refs")
+    elif obj_type == 'report': # UPDATED
+        # Name and Description are handled by the generic fields at the top
+        form_values['rep_report_types'] = st.multiselect("Report Types (Required)", options=REPORT_TYPES_OV[1:], default=data.get('report_types', []), key=f"{key_prefix}_rep_types")
+        datetime_input("Published Date", "published", required=True)
+        form_values['rep_object_refs_str'] = st.text_area("Object Refs (Required, STIX IDs one per line)", value=_list_to_text(data, 'object_refs'), key=f"{key_prefix}_rep_obj_refs")
     elif obj_type == 'threat-actor':
         form_values['ta_threat_actor_types'] = st.multiselect("Threat Actor Types (Required)", options=THREAT_ACTOR_TYPES_OV[1:], default=data.get('threat_actor_types', []), key=f"{key_prefix}_ta_types")
         form_values['ta_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_ta_aliases")
@@ -375,7 +412,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['ta_primary_motivation'] = st.selectbox("Primary Motivation", options=ATTACK_MOTIVATION_OV, index=ATTACK_MOTIVATION_OV.index(_get_default(data, 'primary_motivation', "")), key=f"{key_prefix}_ta_primary_motivation")
         form_values['ta_secondary_motivations'] = st.multiselect("Secondary Motivations", options=ATTACK_MOTIVATION_OV[1:], default=data.get('secondary_motivations', []), key=f"{key_prefix}_ta_secondary_motivations")
         form_values['ta_personal_motivations'] = st.multiselect("Personal Motivations", options=ATTACK_MOTIVATION_OV[1:], default=data.get('personal_motivations', []), key=f"{key_prefix}_ta_personal_motivations")
-    elif obj_type == 'tool':
+    elif obj_type == 'tool': # UPDATED
          form_values['t_tool_types'] = st.multiselect("Tool Types", options=TOOL_TYPES_OV[1:], default=data.get('tool_types', []), key=f"{key_prefix}_t_types")
          form_values['t_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_t_aliases")
          kill_chain_input("t")
@@ -383,36 +420,74 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     elif obj_type == 'vulnerability':
          form_values['vuln_cvssv2_score'] = st.number_input("CVSSv2 Score", value=data.get('cvssV2_score'), min_value=0.0, max_value=10.0, format="%.1f", key=f"{key_prefix}_vuln_cvss2")
          form_values['vuln_cvssv3_score'] = st.number_input("CVSSv3 Score", value=data.get('cvssV3_score'), min_value=0.0, max_value=10.0, format="%.1f", key=f"{key_prefix}_vuln_cvss3")
+    elif obj_type == 'x509-certificate':
+        form_values['cert_is_self_signed'] = st.checkbox("Is Self-Signed?", value=data.get('is_self_signed', False), key=f"{key_prefix}_cert_self_signed")
+        form_values['cert_hashes_str'] = st.text_area("Hashes (HASH_ALGO:value, one per line)", value=_hashes_to_text(data.get('hashes')), key=f"{key_prefix}_cert_hashes")
+        form_values['cert_version'] = st.text_input("Version", value=_get_default(data, 'version'), key=f"{key_prefix}_cert_version")
+        form_values['cert_serial_number'] = st.text_input("Serial Number", value=_get_default(data, 'serial_number'), key=f"{key_prefix}_cert_serial")
+        form_values['cert_signature_algorithm'] = st.text_input("Signature Algorithm", value=_get_default(data, 'signature_algorithm'), key=f"{key_prefix}_cert_sig_algo")
+        form_values['cert_issuer'] = st.text_input("Issuer", value=_get_default(data, 'issuer'), key=f"{key_prefix}_cert_issuer")
+        datetime_input("Validity Not Before", "validity_not_before")
+        datetime_input("Validity Not After", "validity_not_after")
+        form_values['cert_subject'] = st.text_input("Subject", value=_get_default(data, 'subject'), key=f"{key_prefix}_cert_subject")
+        form_values['cert_subject_public_key_algorithm'] = st.text_input("Subject Public Key Algorithm", value=_get_default(data, 'subject_public_key_algorithm'), key=f"{key_prefix}_cert_subj_pk_algo")
+        form_values['cert_subject_public_key_modulus'] = st.text_area("Subject Public Key Modulus", value=_get_default(data, 'subject_public_key_modulus'), key=f"{key_prefix}_cert_subj_pk_mod")
+        form_values['cert_subject_public_key_exponent'] = st.number_input("Subject Public Key Exponent", value=data.get('subject_public_key_exponent'), step=1, key=f"{key_prefix}_cert_subj_pk_exp")
+        default_ext_json = json.dumps(data.get('x509_v3_extensions'), indent=2) if data.get('x509_v3_extensions') else ""
+        form_values['cert_x509_v3_extensions_json'] = st.text_area("X.509 v3 Extensions (JSON)", value=default_ext_json, height=150, key=f"{key_prefix}_cert_ext")
+    elif obj_type == 'domain-name':
+        form_values['domain_value'] = st.text_input("Value (Required)", value=_get_default(data, 'value'), key=f"{key_prefix}_domain_value")
+        form_values['domain_resolves_to_refs_str'] = st.text_area("Resolves To Refs (STIX IDs, one per line)", value=_list_to_text(data, 'resolves_to_refs'), key=f"{key_prefix}_domain_resolves")
+    # --- ADDED software ---
+    elif obj_type == 'software':
+        # Name and description handled above
+        form_values['sw_cpe'] = st.text_input("CPE", value=_get_default(data, 'cpe'), key=f"{key_prefix}_sw_cpe")
+        form_values['sw_swid'] = st.text_input("SWID", value=_get_default(data, 'swid'), key=f"{key_prefix}_sw_swid")
+        form_values['sw_languages_str'] = st.text_area("Languages (one per line)", value=_list_to_text(data, 'languages'), key=f"{key_prefix}_sw_langs")
+        form_values['sw_vendor'] = st.text_input("Vendor", value=_get_default(data, 'vendor'), key=f"{key_prefix}_sw_vendor")
+        form_values['sw_version'] = st.text_input("Version", value=_get_default(data, 'version'), key=f"{key_prefix}_sw_version")
+    # --- END software ---
 
-    # --- External Reference Fields ---
-    st.subheader("External Reference (Optional)")
-    ext_ref_data = data.get('external_references', [{}])[0]
-    form_values['ext_ref_source_name'] = st.text_input("Source Name", value=_get_default(ext_ref_data, 'source_name'), key=f"{key_prefix}_ext_ref_source")
-    form_values['ext_ref_description'] = st.text_input("Description", value=_get_default(ext_ref_data, 'description'), key=f"{key_prefix}_ext_ref_desc")
-    form_values['ext_ref_url'] = st.text_input("URL", value=_get_default(ext_ref_data, 'url'), key=f"{key_prefix}_ext_ref_url")
-    form_values['ext_ref_external_id'] = st.text_input("External ID", value=_get_default(ext_ref_data, 'external_id'), key=f"{key_prefix}_ext_ref_ext_id")
-    form_values['ext_ref_hashes_str'] = st.text_area("Hashes (HASH_ALGO:value)", value=_ext_ref_hashes_to_text(data.get('external_references')), key=f"{key_prefix}_ext_ref_hashes")
+    # --- External Reference Fields (Only if SDO/Relationship, not SCO/Note) ---
+    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key']:
+        st.subheader("External Reference (Optional)")
+        ext_ref_data = data.get('external_references', [{}])[0]
+        form_values['ext_ref_source_name'] = st.text_input("Source Name", value=_get_default(ext_ref_data, 'source_name'), key=f"{key_prefix}_ext_ref_source")
+        form_values['ext_ref_description'] = st.text_input("Description", value=_get_default(ext_ref_data, 'description'), key=f"{key_prefix}_ext_ref_desc")
+        form_values['ext_ref_url'] = st.text_input("URL", value=_get_default(ext_ref_data, 'url'), key=f"{key_prefix}_ext_ref_url")
+        form_values['ext_ref_external_id'] = st.text_input("External ID", value=_get_default(ext_ref_data, 'external_id'), key=f"{key_prefix}_ext_ref_ext_id")
+        form_values['ext_ref_hashes_str'] = st.text_area("Hashes (HASH_ALGO:value)", value=_ext_ref_hashes_to_text(data.get('external_references')), key=f"{key_prefix}_ext_ref_hashes")
 
     return form_values
 
 
 def parse_form_data_to_stix_args(form_data, obj_type):
     """Converts raw form data into a dictionary suitable for stix2 constructors or updates."""
-    # (Function remains the same as previous version)
     obj_args = {}
     def parse_text_area(text_area_str): return [item.strip() for item in text_area_str.splitlines() if item.strip()]
     def format_stix_timestamp(date_val, time_val):
         if date_val is None: return None
         time_val = time_val or dt_time(0, 0, 0)
         try:
-            combined_dt = datetime.combine(date_val, time_val)
-            return combined_dt.strftime('%Y-%m-%dT%H:%M:%S') + ".000Z"
+            combined_dt = datetime.combine(date_val, time_val).replace(tzinfo=timezone.utc)
+            return combined_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + "Z"
         except Exception as e: st.error(f"Error combining date/time: {e}"); return None
+    def parse_hashes_str(hashes_str):
+        hashes_dict = {}
+        for line in hashes_str.splitlines():
+            if ':' in line:
+                parts = line.split(':', 1); algo = parts[0].strip().upper(); hash_val = parts[1].strip()
+                if algo in HASH_ALGO_OV and algo != "": hashes_dict[algo] = hash_val
+        return hashes_dict if hashes_dict else None
+
+    # Generic Fields (if applicable)
     if form_data.get('name'): obj_args['name'] = form_data['name']
     if form_data.get('description'): obj_args['description'] = form_data['description']
+
+    # Type Specific Parsing
     if obj_type == 'attack-pattern':
         if form_data.get('ap_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['ap_aliases_str'])
-    elif obj_type == 'campaign':
+    elif obj_type == 'campaign': # UPDATED
         if form_data.get('c_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['c_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
@@ -421,18 +496,19 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('id_identity_class'): obj_args['identity_class'] = form_data['id_identity_class']
         if form_data.get('id_sectors'): obj_args['sectors'] = form_data['id_sectors']
         if form_data.get('id_contact_information'): obj_args['contact_information'] = form_data['id_contact_information']
-    elif obj_type == 'indicator':
+    elif obj_type == 'indicator': # UPDATED
         if form_data.get('ind_indicator_types'): obj_args['indicator_types'] = form_data['ind_indicator_types']
-        if form_data.get('ind_pattern_type'): obj_args['pattern_type'] = form_data['ind_pattern_type']
-        if form_data.get('ind_pattern'): obj_args['pattern'] = form_data['ind_pattern']
-        ts = format_stix_timestamp(form_data.get('valid_from_date'), form_data.get('valid_from_time')); obj_args.update({'valid_from': ts} if ts else {})
+        if form_data.get('ind_pattern_type'): obj_args['pattern_type'] = form_data['ind_pattern_type'] # Required
+        if form_data.get('ind_pattern'): obj_args['pattern'] = form_data['ind_pattern'] # Required
+        ts = format_stix_timestamp(form_data.get('valid_from_date'), form_data.get('valid_from_time')); # Required
+        if ts: obj_args['valid_from'] = ts
         ts = format_stix_timestamp(form_data.get('valid_until_date'), form_data.get('valid_until_time')); obj_args.update({'valid_until': ts} if ts else {})
-    elif obj_type == 'infrastructure':
+    elif obj_type == 'infrastructure': # UPDATED
         if form_data.get('inf_infrastructure_types'): obj_args['infrastructure_types'] = form_data['inf_infrastructure_types']
         if form_data.get('inf_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['inf_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
-    elif obj_type == 'intrusion-set':
+    elif obj_type == 'intrusion-set': # UPDATED
         if form_data.get('is_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['is_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
@@ -447,10 +523,16 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('loc_city'): obj_args['city'] = form_data['loc_city']
         if form_data.get('loc_street_address'): obj_args['street_address'] = form_data['loc_street_address']
         if form_data.get('loc_postal_code'): obj_args['postal_code'] = form_data['loc_postal_code']
-        if form_data.get('loc_latitude') is not None: obj_args['latitude'] = form_data['loc_latitude']
-        if form_data.get('loc_longitude') is not None: obj_args['longitude'] = form_data['loc_longitude']
-        if form_data.get('loc_precision') is not None: obj_args['precision'] = form_data['loc_precision']
-    elif obj_type == 'malware':
+        if form_data.get('loc_latitude') is not None:
+            try: obj_args['latitude'] = float(form_data['loc_latitude'])
+            except (ValueError, TypeError): pass
+        if form_data.get('loc_longitude') is not None:
+             try: obj_args['longitude'] = float(form_data['loc_longitude'])
+             except (ValueError, TypeError): pass
+        if form_data.get('loc_precision') is not None:
+             try: obj_args['precision'] = float(form_data['loc_precision'])
+             except (ValueError, TypeError): pass
+    elif obj_type == 'malware': # UPDATED
         if form_data.get('mal_malware_types'): obj_args['malware_types'] = form_data['mal_malware_types']
         obj_args['is_family'] = form_data.get('mal_is_family', False)
         if form_data.get('mal_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['mal_aliases_str'])
@@ -461,19 +543,28 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('mal_implementation_languages_str'): obj_args['implementation_languages'] = parse_text_area(form_data['mal_implementation_languages_str'])
         if form_data.get('mal_capabilities_str'): obj_args['capabilities'] = parse_text_area(form_data['mal_capabilities_str'])
         if form_data.get('mal_sample_refs_str'): obj_args['sample_refs'] = parse_text_area(form_data['mal_sample_refs_str'])
-    elif obj_type == 'note':
-        if form_data.get('note_content'): obj_args['content'] = form_data['note_content']
-        if form_data.get('note_authors_str'): obj_args['authors'] = parse_text_area(form_data['note_authors_str'])
-        if form_data.get('note_object_refs_str'): obj_args['object_refs'] = parse_text_area(form_data['note_object_refs_str'])
+    elif obj_type == 'note': # UPDATED
+        if form_data.get('note_abstract'): obj_args['abstract'] = form_data['note_abstract']
+        if form_data.get('note_content'): obj_args['content'] = form_data['note_content'] # Required
+        if form_data.get('note_authors_str'):
+            authors = parse_text_area(form_data['note_authors_str'])
+            if authors: obj_args['authors'] = authors
+        if form_data.get('note_object_refs_str'):
+            refs = parse_text_area(form_data['note_object_refs_str'])
+            if refs: obj_args['object_refs'] = refs # Required
     elif obj_type == 'observed-data':
         ts = format_stix_timestamp(form_data.get('first_observed_date'), form_data.get('first_observed_time')); obj_args.update({'first_observed': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_observed_date'), form_data.get('last_observed_time')); obj_args.update({'last_observed': ts} if ts else {})
         if form_data.get('obs_number_observed') is not None: obj_args['number_observed'] = form_data['obs_number_observed']
         if form_data.get('obs_object_refs_str'): obj_args['object_refs'] = parse_text_area(form_data['obs_object_refs_str'])
-    elif obj_type == 'report':
-        if form_data.get('rep_report_types'): obj_args['report_types'] = form_data['rep_report_types']
-        ts = format_stix_timestamp(form_data.get('published_date'), form_data.get('published_time')); obj_args.update({'published': ts} if ts else {})
-        if form_data.get('rep_object_refs_str'): obj_args['object_refs'] = parse_text_area(form_data['rep_object_refs_str'])
+    elif obj_type == 'report': # UPDATED
+        # Name and Description handled by generic fields
+        if form_data.get('rep_report_types'): obj_args['report_types'] = form_data['rep_report_types'] # Required
+        ts = format_stix_timestamp(form_data.get('published_date'), form_data.get('published_time')) # Required
+        if ts: obj_args['published'] = ts
+        if form_data.get('rep_object_refs_str'):
+            refs = parse_text_area(form_data['rep_object_refs_str'])
+            if refs: obj_args['object_refs'] = refs # Required
     elif obj_type == 'threat-actor':
         if form_data.get('ta_threat_actor_types'): obj_args['threat_actor_types'] = form_data['ta_threat_actor_types']
         if form_data.get('ta_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['ta_aliases_str'])
@@ -486,15 +577,54 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('ta_primary_motivation'): obj_args['primary_motivation'] = form_data['ta_primary_motivation']
         if form_data.get('ta_secondary_motivations'): obj_args['secondary_motivations'] = form_data['ta_secondary_motivations']
         if form_data.get('ta_personal_motivations'): obj_args['personal_motivations'] = form_data['ta_personal_motivations']
-    elif obj_type == 'tool':
+    elif obj_type == 'tool': # UPDATED
         if form_data.get('t_tool_types'): obj_args['tool_types'] = form_data['t_tool_types']
         if form_data.get('t_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['t_aliases_str'])
         if form_data.get('t_tool_version'): obj_args['tool_version'] = form_data['t_tool_version']
     elif obj_type == 'vulnerability':
         if form_data.get('vuln_cvssv2_score') is not None: obj_args['cvssV2_score'] = form_data['vuln_cvssv2_score']
         if form_data.get('vuln_cvssv3_score') is not None: obj_args['cvssV3_score'] = form_data['vuln_cvssv3_score']
+    elif obj_type == 'x509-certificate':
+        obj_args['is_self_signed'] = form_data.get('cert_is_self_signed', False)
+        if form_data.get('cert_hashes_str'):
+            hashes = parse_hashes_str(form_data['cert_hashes_str'])
+            if hashes: obj_args['hashes'] = hashes
+        if form_data.get('cert_version'): obj_args['version'] = form_data['cert_version']
+        if form_data.get('cert_serial_number'): obj_args['serial_number'] = form_data['cert_serial_number']
+        if form_data.get('cert_signature_algorithm'): obj_args['signature_algorithm'] = form_data['cert_signature_algorithm']
+        if form_data.get('cert_issuer'): obj_args['issuer'] = form_data['cert_issuer']
+        ts = format_stix_timestamp(form_data.get('validity_not_before_date'), form_data.get('validity_not_before_time'))
+        if ts: obj_args['validity_not_before'] = ts
+        ts = format_stix_timestamp(form_data.get('validity_not_after_date'), form_data.get('validity_not_after_time'))
+        if ts: obj_args['validity_not_after'] = ts
+        if form_data.get('cert_subject'): obj_args['subject'] = form_data['cert_subject']
+        if form_data.get('cert_subject_public_key_algorithm'): obj_args['subject_public_key_algorithm'] = form_data['cert_subject_public_key_algorithm']
+        if form_data.get('cert_subject_public_key_modulus'): obj_args['subject_public_key_modulus'] = form_data['cert_subject_public_key_modulus']
+        if form_data.get('cert_subject_public_key_exponent') is not None:
+             try: obj_args['subject_public_key_exponent'] = int(form_data['cert_subject_public_key_exponent'])
+             except (ValueError, TypeError): st.warning("Invalid input for public key exponent, expected integer.")
+        if form_data.get('cert_x509_v3_extensions_json'):
+            try:
+                ext_data = json.loads(form_data['cert_x509_v3_extensions_json'])
+                if isinstance(ext_data, dict): obj_args['x509_v3_extensions'] = ext_data
+                else: st.warning("X.509 v3 Extensions input is not valid JSON dictionary, skipping.")
+            except json.JSONDecodeError: st.warning("X.509 v3 Extensions input is not valid JSON, skipping.")
+    elif obj_type == 'domain-name':
+        if form_data.get('domain_value'): obj_args['value'] = form_data['domain_value'] # Required
+        if form_data.get('domain_resolves_to_refs_str'):
+            refs = parse_text_area(form_data['domain_resolves_to_refs_str'])
+            if refs: obj_args['resolves_to_refs'] = refs
+    # --- ADDED software Parsing ---
+    elif obj_type == 'software':
+        # Name and description parsed above
+        if form_data.get('sw_cpe'): obj_args['cpe'] = form_data['sw_cpe']
+        if form_data.get('sw_swid'): obj_args['swid'] = form_data['sw_swid']
+        if form_data.get('sw_languages_str'): obj_args['languages'] = parse_text_area(form_data['sw_languages_str'])
+        if form_data.get('sw_vendor'): obj_args['vendor'] = form_data['sw_vendor']
+        if form_data.get('sw_version'): obj_args['version'] = form_data['sw_version']
+    # --- END software Parsing ---
 
-    # --- Kill Chain Phase Processing ---
+    # --- Kill Chain Phase Processing (Applies to relevant types) ---
     kc_prefix_map = {'attack-pattern': 'ap', 'indicator': 'ind', 'infrastructure': 'inf', 'malware': 'mal', 'tool': 't'}
     kc_prefix = kc_prefix_map.get(obj_type)
     if kc_prefix:
@@ -507,52 +637,53 @@ def parse_form_data_to_stix_args(form_data, obj_type):
             final_kc_name = selected_kc_name
         if final_kc_name and phase_name:
             obj_args['kill_chain_phases'] = [{'kill_chain_name': final_kc_name.lower().replace(" ", "-"), 'phase_name': phase_name.lower().replace(" ", "-")}]
-        elif 'kill_chain_phases' in obj_args: del obj_args['kill_chain_phases']
+        elif 'kill_chain_phases' in obj_args: del obj_args['kill_chain_phases'] # Clear if no valid selection
 
-    # --- External Reference ---
-    ext_ref_source = form_data.get('ext_ref_source_name')
-    ext_ref_desc = form_data.get('ext_ref_description')
-    ext_ref_url = form_data.get('ext_ref_url')
-    ext_ref_ext_id = form_data.get('ext_ref_external_id')
-    ext_ref_hashes_str = form_data.get('ext_ref_hashes_str')
-    if ext_ref_source and (ext_ref_desc or ext_ref_url or ext_ref_ext_id):
-        ext_ref = {"source_name": ext_ref_source}
-        if ext_ref_desc: ext_ref["description"] = ext_ref_desc
-        if ext_ref_url: ext_ref["url"] = ext_ref_url
-        if ext_ref_ext_id: ext_ref["external_id"] = ext_ref_ext_id
-        if ext_ref_hashes_str:
-            hashes_dict = {}
-            for line in ext_ref_hashes_str.splitlines():
-                if ':' in line:
-                    parts = line.split(':', 1); algo = parts[0].strip().upper(); hash_val = parts[1].strip()
-                    if algo in HASH_ALGO_OV and algo != "": hashes_dict[algo] = hash_val
-            if hashes_dict: ext_ref["hashes"] = hashes_dict
-        obj_args["external_references"] = [ext_ref]
-    elif not ext_ref_source: obj_args["external_references"] = None
+    # --- External Reference (Only if SDO/Relationship, not SCO/Note) ---
+    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key']:
+        ext_ref_source = form_data.get('ext_ref_source_name')
+        ext_ref_desc = form_data.get('ext_ref_description')
+        ext_ref_url = form_data.get('ext_ref_url')
+        ext_ref_ext_id = form_data.get('ext_ref_external_id')
+        ext_ref_hashes_str = form_data.get('ext_ref_hashes_str')
+        if ext_ref_source and (ext_ref_desc or ext_ref_url or ext_ref_ext_id or ext_ref_hashes_str): # Check if any ext ref field has value
+            ext_ref = {"source_name": ext_ref_source}
+            if ext_ref_desc: ext_ref["description"] = ext_ref_desc
+            if ext_ref_url: ext_ref["url"] = ext_ref_url
+            if ext_ref_ext_id: ext_ref["external_id"] = ext_ref_ext_id
+            if ext_ref_hashes_str:
+                hashes = parse_hashes_str(ext_ref_hashes_str)
+                if hashes: ext_ref["hashes"] = hashes
+            obj_args["external_references"] = [ext_ref]
+        elif "external_references" in obj_args: # Remove if source name is now empty
+             del obj_args["external_references"]
+
 
     # Remove keys with empty/None values unless required or specific cases
     required_fields = {
         'indicator': ['pattern_type', 'pattern', 'valid_from'],
         'note': ['content', 'object_refs'],
         'observed-data': ['first_observed', 'last_observed', 'number_observed', 'object_refs'],
-        'report': ['report_types', 'published', 'object_refs'],
-        'threat-actor': ['threat_actor_types']
+        'report': ['name', 'report_types', 'published', 'object_refs'],
+        'threat-actor': ['threat_actor_types'],
+        'x509-certificate': [],
+        'domain-name': ['value'],
+        'software': ['name'] # Name is required for software
     }
     args_copy = obj_args.copy()
     for key, value in args_copy.items():
         is_required = key in required_fields.get(obj_type, [])
-        if key == 'is_family': continue
-        is_timestamp_field = key in ['first_seen', 'last_seen', 'valid_until', 'published', 'first_observed', 'last_observed', 'valid_from']
-        if not is_required and not is_timestamp_field and (value is None or value == "" or value == []):
+        if key == 'is_family' or key == 'is_self_signed': continue # Booleans, keep False if needed
+        is_timestamp_field = key in ['first_seen', 'last_seen', 'valid_until', 'published', 'first_observed', 'last_observed', 'valid_from', 'validity_not_before', 'validity_not_after']
+        # Remove if not required AND (value is None OR empty string OR empty list)
+        if not is_required and (value is None or value == "" or value == []):
             del obj_args[key]
-        elif key == "external_references" and value is None:
-            if key in obj_args: del obj_args[key]
-        elif is_timestamp_field and value is None and key in obj_args:
-             pass
+
     return obj_args
 
 
 # --- Main App ---
+# (Rest of the Main App logic remains the same as previous version)
 st.title("STIX 2.1 Visualizer & Editor")
 load_status_placeholder = st.empty()
 
@@ -606,7 +737,16 @@ with st.sidebar:
                             if obj_type == 'relationship':
                                 if 'source_ref' in obj_dict and 'target_ref' in obj_dict and 'relationship_type' in obj_dict: temp_edges.append({'data': {'id': obj_id, 'source': obj_dict['source_ref'], 'target': obj_dict['target_ref'], 'label': obj_dict['relationship_type']}})
                                 else: skipped_objects += 1
-                            elif obj_type != 'marking-definition': label = obj_dict.get('name', obj_dict.get('value', obj_id)); temp_nodes.append({'data': {'id': obj_id, 'label': label}})
+                            elif obj_type != 'marking-definition':
+                                # Use value or serial_number/subject/abstract for label if name missing
+                                label = obj_dict.get('name', obj_dict.get('value'))
+                                if obj_type == 'x509-certificate' and not label:
+                                     label = obj_dict.get('serial_number', obj_dict.get('subject', obj_id))
+                                elif obj_type == 'note' and not label:
+                                     label = obj_dict.get('abstract', obj_id) # Use abstract for note if name missing
+                                elif not label:
+                                     label = obj_id
+                                temp_nodes.append({'data': {'id': obj_id, 'label': label}})
                             processed_count += 1
                         except Exception as obj_proc_e: skipped_objects += 1
                         progress_bar.progress((i + 1) / total_objects, text=f"Processing object {i+1}/{total_objects}")
@@ -625,7 +765,6 @@ with st.sidebar:
 
     # --- Add Object ---
     with st.expander("Add STIX Object", expanded=False):
-        # (Add Object form logic remains the same)
         def update_add_form_type():
             st.session_state.add_form_selected_type = st.session_state.add_obj_type_select_widget
             st.session_state.editing_object_id = None
@@ -634,35 +773,92 @@ with st.sidebar:
         if st.session_state.add_form_selected_type in ALL_OBJECT_TYPES: current_add_type_index = ALL_OBJECT_TYPES.index(st.session_state.add_form_selected_type)
         obj_type_selection = st.selectbox("Object Type", ALL_OBJECT_TYPES, key="add_obj_type_select_widget", index=current_add_type_index, on_change=update_add_form_type)
         add_obj_type = st.session_state.add_form_selected_type
+
+        # --- Form for Adding Objects ---
         with st.form(f"add_object_detail_form_{add_obj_type}", clear_on_submit=True):
             add_form_data = generate_object_form_fields(add_obj_type, key_prefix="add")
-            add_obj_submit = st.form_submit_button("Create Object")
+            add_obj_submit = st.form_submit_button(f"Create {add_obj_type} Object") # Changed label slightly
+
             if add_obj_submit:
-                validation_passed = True; error_messages = [] # Simplified validation
+                validation_passed = True; error_messages = []
+                # --- ADDED Validation ---
+                if add_obj_type == 'domain-name' and not add_form_data.get('domain_value'):
+                    error_messages.append("Domain Name 'Value' is required.")
+                    validation_passed = False
+                if add_obj_type == 'note' and not add_form_data.get('note_content'):
+                    error_messages.append("Note 'Content' is required.")
+                    validation_passed = False
+                if add_obj_type == 'note' and not add_form_data.get('note_object_refs_str'):
+                    error_messages.append("Note 'Object Refs' are required.")
+                    validation_passed = False
+                if add_obj_type == 'report' and not add_form_data.get('name'):
+                    error_messages.append("Report 'Name' is required.")
+                    validation_passed = False
+                if add_obj_type == 'report' and not add_form_data.get('rep_report_types'):
+                    error_messages.append("Report 'Report Types' are required.")
+                    validation_passed = False
+                if add_obj_type == 'report' and (not add_form_data.get('published_date') or not add_form_data.get('published_time')):
+                    error_messages.append("Report 'Published Date/Time' is required.")
+                    validation_passed = False
+                if add_obj_type == 'report' and not add_form_data.get('rep_object_refs_str'):
+                    error_messages.append("Report 'Object Refs' are required.")
+                    validation_passed = False
+                if add_obj_type == 'software' and not add_form_data.get('name'):
+                    error_messages.append("Software 'Name' is required.")
+                    validation_passed = False
+                # --- End Validation ---
                 if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
-                if validation_passed:
+
+                if validation_passed and add_form_data: # Check if form data exists
                     obj_id = f"{add_obj_type}--{uuid.uuid4()}"
                     obj_args = parse_form_data_to_stix_args(add_form_data, add_obj_type)
                     obj_args['id'] = obj_id; obj_args['allow_custom'] = True
                     try:
-                        if add_obj_type in TYPE_TO_CLASS_MAPPING:
-                            constructor = TYPE_TO_CLASS_MAPPING[add_obj_type]
-                            stix_obj = constructor(**obj_args)
-                            obj_dict = json.loads(stix_obj.serialize())
-                            st.session_state.objects.append(obj_dict)
-                            st.session_state.nodes.append({'data': { 'id': obj_id, 'label': obj_args.get('name', obj_id) }})
-                            st.success(f"Created {add_obj_type}: {obj_args.get('name', obj_id)}")
-                            if len(st.session_state.nodes) >= 1: st.session_state.rel_source_sel = st.session_state.nodes[0]['data']['id']
-                            if len(st.session_state.nodes) >= 2: st.session_state.rel_target_sel = st.session_state.nodes[1]['data']['id']
-                            else: st.session_state.rel_target_sel = None
-                            st.rerun()
-                        else: st.error(f"Cannot create object: No constructor mapping for type '{add_obj_type}'.")
-                    except InvalidValueError as ve: st.error(f"STIX Validation Error creating '{obj_args.get('name', obj_id)}': {ve}")
-                    except Exception as creation_e: st.error(f"Error creating STIX object '{obj_args.get('name', obj_id)}': {creation_e}")
+                        # Use generic parse for all types now, relying on allow_custom
+                        stix_obj = parse(obj_args, allow_custom=True)
+                        if isinstance(stix_obj, dict):
+                             obj_dict = stix_obj
+                             obj_dict['id'] = obj_args['id']
+                             obj_dict['type'] = add_obj_type
+                        else:
+                             obj_dict = json.loads(stix_obj.serialize())
+
+                        st.session_state.objects.append(obj_dict)
+                        # Determine label for node
+                        label = obj_args.get('name', obj_args.get('value')) # Use value for SCOs if name missing
+                        if obj_type == 'x509-certificate' and not label:
+                            label = obj_args.get('serial_number', obj_args.get('subject', obj_id))
+                        elif obj_type == 'note' and not label:
+                            label = obj_args.get('abstract', obj_id) # Use abstract for note
+                        elif not label:
+                            label = obj_id
+                        st.session_state.nodes.append({'data': { 'id': obj_id, 'label': label }})
+                        st.success(f"Created {add_obj_type}: {label}")
+
+                        # --- Generate Maps Link AFTER submission ---
+                        if add_obj_type == "location":
+                            lat = add_form_data.get("loc_latitude")
+                            lon = add_form_data.get("loc_longitude")
+                            maps_url = generate_maps_link(lat, lon)
+                            if maps_url:
+                                st.session_state.map_url_to_display = maps_url # Store URL to display outside form
+                            else:
+                                st.session_state.map_url_to_display = None
+                                st.warning("Could not generate maps link: Invalid or missing Latitude/Longitude.")
+                        else:
+                            st.session_state.map_url_to_display = None
+                        # --- End Maps Link Generation ---
+
+                        if len(st.session_state.nodes) >= 1: st.session_state.rel_source_sel = st.session_state.nodes[0]['data']['id']
+                        if len(st.session_state.nodes) >= 2: st.session_state.rel_target_sel = st.session_state.nodes[1]['data']['id']
+                        else: st.session_state.rel_target_sel = None
+                        st.rerun()
+                    except InvalidValueError as ve: st.error(f"STIX Validation Error creating '{obj_args.get('name', obj_args.get('value', obj_id))}': {ve}")
+                    except Exception as creation_e: st.error(f"Error creating STIX object '{obj_args.get('name', obj_args.get('value', obj_id))}': {creation_e}")
 
     # --- Create Relationship ---
+    # (Keep existing Create Relationship logic)
     with st.expander("Create Relationship", expanded=False):
-        # (Create Relationship logic remains the same)
         eligible_nodes = [o for o in st.session_state.objects if o.get('type') not in ['relationship', 'marking-definition']]
         node_options = {o['id']: f"{o.get('name', o.get('value', o.get('id', 'ID Missing')))} ({o.get('type', 'Type Missing')})" for o in eligible_nodes}
         if not eligible_nodes or len(eligible_nodes) < 2: st.info("Add at least two graph objects first.")
@@ -715,38 +911,105 @@ with st.sidebar:
 
     # --- Edit Object Form ---
     with st.expander("Edit Selected Object", expanded=(st.session_state.editing_object_id is not None)):
-        # (Edit Object form logic remains the same)
         if st.session_state.editing_object_id:
             object_to_edit = next((o for o in st.session_state.objects if o.get('id') == st.session_state.editing_object_id), None)
             if object_to_edit:
                 edit_obj_type = object_to_edit.get('type', 'unknown')
-                st.info(f"Editing: {object_to_edit.get('name', st.session_state.editing_object_id)} ({edit_obj_type})")
+                # Use appropriate label for certs and domain names
+                edit_label = object_to_edit.get('name', object_to_edit.get('value', st.session_state.editing_object_id)) # Use value for SCOs
+                if edit_obj_type == 'x509-certificate':
+                    edit_label = object_to_edit.get('serial_number', object_to_edit.get('subject', st.session_state.editing_object_id))
+                elif edit_obj_type == 'note':
+                     edit_label = object_to_edit.get('abstract', st.session_state.editing_object_id)
+
+                st.info(f"Editing: {edit_label} ({edit_obj_type})")
                 st.markdown('<div class="edit-form-container">', unsafe_allow_html=True)
-                with st.form(f"edit_object_form_{st.session_state.editing_object_id}", clear_on_submit=False):
+                # --- Ensure Edit Form has Submit Button ---
+                with st.form(f"edit_object_form_{st.session_state.editing_object_id}", clear_on_submit=False): # Keep values on submit for feedback
                     edit_form_data = generate_object_form_fields(edit_obj_type, obj_data=object_to_edit, key_prefix="edit")
-                    update_obj_submit = st.form_submit_button("Update Object")
+                    update_obj_submit = st.form_submit_button("Update Object") # Submit button for the edit form
+
                     if update_obj_submit:
-                        validation_passed = True; error_messages = [] # Simplified validation
+                        validation_passed = True; error_messages = []
+                        # --- ADDED Validation ---
+                        if edit_obj_type == 'domain-name' and not edit_form_data.get('domain_value'):
+                            error_messages.append("Domain Name 'Value' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'note' and not edit_form_data.get('note_content'):
+                            error_messages.append("Note 'Content' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'note' and not edit_form_data.get('note_object_refs_str'):
+                            error_messages.append("Note 'Object Refs' are required.")
+                            validation_passed = False
+                        if edit_obj_type == 'report' and not edit_form_data.get('name'):
+                            error_messages.append("Report 'Name' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'report' and not edit_form_data.get('rep_report_types'):
+                            error_messages.append("Report 'Report Types' are required.")
+                            validation_passed = False
+                        if edit_obj_type == 'report' and (not edit_form_data.get('published_date') or not edit_form_data.get('published_time')):
+                            error_messages.append("Report 'Published Date/Time' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'report' and not edit_form_data.get('rep_object_refs_str'):
+                            error_messages.append("Report 'Object Refs' are required.")
+                            validation_passed = False
+                        if edit_obj_type == 'software' and not edit_form_data.get('name'):
+                            error_messages.append("Software 'Name' is required.")
+                            validation_passed = False
+                        # --- End Validation ---
                         if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
-                        if validation_passed:
+
+                        if validation_passed and edit_form_data: # Check form data exists
                             try:
                                 update_args = parse_form_data_to_stix_args(edit_form_data, edit_obj_type)
                                 obj_index = next((i for i, o in enumerate(st.session_state.objects) if o.get('id') == st.session_state.editing_object_id), -1)
                                 if obj_index != -1:
                                     original_obj = st.session_state.objects[obj_index]; updated_obj = original_obj.copy()
                                     updated_obj['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ') # Use timezone.utc
-                                    for key, value in update_args.items(): updated_obj[key] = value
-                                    for key in list(updated_obj.keys()):
-                                         if key not in update_args and key not in ['id', 'type', 'spec_version', 'created', 'modified']:
-                                             if key in edit_form_data and (edit_form_data[key] == "" or edit_form_data[key] == []): del updated_obj[key]
-                                             elif key == "external_references" and update_args.get("external_references") is None: del updated_obj[key]
+
+                                    # More robust update: Apply only changed values from update_args
+                                    for key, value in update_args.items():
+                                        updated_obj[key] = value
+
+                                    # Remove keys that are NOT in update_args AND are not base fields
+                                    base_fields = ['id', 'type', 'spec_version', 'created', 'modified']
+                                    keys_to_remove = [k for k in updated_obj if k not in update_args and k not in base_fields]
+                                    for k in keys_to_remove:
+                                        del updated_obj[k]
+
+                                    # Validate the updated object using stix2.parse
                                     temp_stix_obj = parse(updated_obj, allow_custom=True)
-                                    validated_obj_dict = json.loads(temp_stix_obj.serialize())
+                                    validated_obj_dict = json.loads(temp_stix_obj.serialize()) # Use validated dict
+
                                     st.session_state.objects[obj_index] = validated_obj_dict
+
+                                    # Update node label in graph data if relevant field changed
                                     node_index = next((i for i, n in enumerate(st.session_state.nodes) if n['data']['id'] == st.session_state.editing_object_id), -1)
-                                    if node_index != -1: st.session_state.nodes[node_index]['data']['label'] = validated_obj_dict.get('name', validated_obj_dict.get('value', st.session_state.editing_object_id))
+                                    if node_index != -1:
+                                        new_label = validated_obj_dict.get('name', validated_obj_dict.get('value')) # Use value for SCOs
+                                        if edit_obj_type == 'x509-certificate' and not new_label:
+                                            new_label = validated_obj_dict.get('serial_number', validated_obj_dict.get('subject', st.session_state.editing_object_id))
+                                        elif edit_obj_type == 'note' and not new_label:
+                                             new_label = validated_obj_dict.get('abstract', st.session_state.editing_object_id)
+                                        elif not new_label:
+                                            new_label = st.session_state.editing_object_id # Fallback to ID
+                                        st.session_state.nodes[node_index]['data']['label'] = new_label
+
                                     st.success(f"Updated object: {st.session_state.editing_object_id}")
-                                    st.rerun()
+
+                                    # --- Generate Maps Link AFTER submission ---
+                                    if edit_obj_type == "location":
+                                        lat = edit_form_data.get("loc_latitude")
+                                        lon = edit_form_data.get("loc_longitude")
+                                        maps_url = generate_maps_link(lat, lon)
+                                        st.session_state.map_url_to_display = maps_url # Store URL
+                                        if not maps_url:
+                                            st.warning("Could not generate maps link: Invalid or missing Latitude/Longitude.")
+                                    else:
+                                         st.session_state.map_url_to_display = None
+                                    # --- End Maps Link Generation ---
+
+                                    st.rerun() # Rerun to reflect changes and potentially show map link
                                 else: st.error("Error: Could not find object in state to update.")
                             except InvalidValueError as ve: st.error(f"STIX Validation Error updating object: {ve}")
                             except Exception as update_e: st.error(f"Error updating object: {update_e}")
@@ -755,8 +1018,8 @@ with st.sidebar:
         else: st.info("Select a single node in the graph to edit its properties.")
 
     # --- Edit Relationship Form ---
+    # (Keep existing Edit Relationship logic)
     with st.expander("Edit Selected Relationship", expanded=(st.session_state.editing_relationship_id is not None)):
-        # (Edit Relationship logic remains the same)
         if st.session_state.editing_relationship_id:
             rel_to_edit = next((o for o in st.session_state.objects if o.get('id') == st.session_state.editing_relationship_id), None)
             if rel_to_edit and rel_to_edit.get('type') == 'relationship':
@@ -770,14 +1033,14 @@ with st.sidebar:
                     st.info(f"Editing Relationship: {source_label} -> {target_label}")
                     source_type = source_obj.get('type'); target_type = target_obj.get('type')
                     valid_rel_types = HARDCODED_VALID_RELATIONSHIPS.get((source_type, target_type), [])
-                    if current_rel_type not in valid_rel_types: valid_rel_types.append(current_rel_type)
+                    if current_rel_type not in valid_rel_types: valid_rel_types.append(current_rel_type) # Ensure current type is selectable
                     rel_type_index = valid_rel_types.index(current_rel_type) if current_rel_type in valid_rel_types else 0
                     st.markdown('<div class="edit-rel-form-container">', unsafe_allow_html=True)
                     with st.form(f"edit_relationship_form_{st.session_state.editing_relationship_id}", clear_on_submit=False):
                         st.text_input("Source", value=source_label, disabled=True); st.text_input("Target", value=target_label, disabled=True)
                         new_rel_type = st.selectbox("Relationship Type", options=valid_rel_types, index=rel_type_index, key=f"edit_rel_type_{st.session_state.editing_relationship_id}", disabled=not valid_rel_types)
                         new_desc = st.text_area("Description", value=current_desc, key=f"edit_rel_desc_{st.session_state.editing_relationship_id}")
-                        update_rel_submit = st.form_submit_button("Update Relationship")
+                        update_rel_submit = st.form_submit_button("Update Relationship") # Submit button
                         if update_rel_submit:
                             try:
                                 rel_obj_index = next((i for i, o in enumerate(st.session_state.objects) if o.get('id') == st.session_state.editing_relationship_id), -1)
@@ -800,8 +1063,8 @@ with st.sidebar:
         else: st.info("Select a single edge (relationship) in the graph to edit its properties.")
 
     # --- Remove Selected Element ---
+    # (Keep existing Remove logic)
     with st.expander("Remove Selected Elements", expanded=False):
-        # (Remove logic remains the same)
         elements_to_remove_ids = []
         current_selection = st.session_state.get('current_selection')
         if current_selection and isinstance(current_selection, dict):
@@ -836,8 +1099,8 @@ with st.sidebar:
         else: st.info("Click elements in the graph to select them for removal.")
 
     # --- Export STIX bundle ---
+    # (Keep existing Export logic)
     with st.expander("Export Bundle", expanded=False):
-        # (Export logic remains the same)
         if st.button("Generate & Download STIX 2.1 Bundle"):
             if not st.session_state.objects: st.warning("No objects to export.")
             else:
@@ -859,7 +1122,13 @@ with st.sidebar:
 
 # --- Main Area Content ---
 
+# --- Display Map Link (if generated from last submission) ---
+if st.session_state.map_url_to_display:
+    st.markdown(f'<div class="maps-link-container">🗺️ [View Location on Google Maps]({st.session_state.map_url_to_display})</div>', unsafe_allow_html=True)
+    st.session_state.map_url_to_display = None # Clear after displaying once
+
 # --- Graph Section ---
+# (Keep existing Graph logic)
 header_cols = st.columns([0.85, 0.15])
 with header_cols[0]: st.markdown("#### Graph View", unsafe_allow_html=True)
 with header_cols[1]:
@@ -890,7 +1159,7 @@ if not elements: st.info("Load a STIX bundle or add objects to view the graph.")
 else: selected = cytoscape(elements=elements, stylesheet=stylesheet, layout={ 'name': 'cose', 'idealEdgeLength': 150, 'nodeOverlap': 20, 'padding': 30, 'animate': False }, width="100%", height=graph_height, selection_type='multiple', key="stix_graph_final")
 
 # --- Process Selection Update (Always run this logic) ---
-# (Selection update logic remains the same)
+# (Keep existing Selection update logic)
 current_selection_in_state = st.session_state.get('current_selection')
 new_editing_object_id = None; new_editing_relationship_id = None; rerun_needed_for_edit_state_change = False
 if selected is not None and selected != current_selection_in_state:
