@@ -261,109 +261,172 @@ def get_sidebar_logo_uri():
 # --- Form Generation and Parsing Helpers ---
 
 def _get_default(data, key, default=""):
+    """Safely gets a value from a dictionary, returning a default if None or missing."""
     val = data.get(key, default)
     return val if val is not None else default
 
 def _list_to_text(data, key):
+    """Converts a list found at data[key] to a newline-separated string."""
     return "\n".join(data.get(key, []))
 
 def _kill_chain_to_text(data, key):
+    """Converts kill_chain_phases list to a newline-separated string."""
     phases = data.get(key, [])
     return "\n".join([f"{p.get('kill_chain_name', '')}:{p.get('phase_name', '')}" for p in phases])
 
 def _hashes_to_text(hashes_dict):
-    """Converts a hashes dictionary to a multiline string."""
+    """Converts a hashes dictionary {algo: hash} to a multiline string 'ALGO:hash'."""
     if not hashes_dict or not isinstance(hashes_dict, dict): return ""
     return "\n".join([f"{algo}:{h}" for algo, h in hashes_dict.items()])
 
 def _ext_ref_hashes_to_text(ext_refs):
+    """Extracts hashes from the first external reference and converts to multiline string."""
     if not ext_refs or not isinstance(ext_refs, list) or not ext_refs[0].get("hashes"): return ""
     hashes_dict = ext_refs[0].get("hashes", {})
     return "\n".join([f"{algo}:{h}" for algo, h in hashes_dict.items()])
 
 def _parse_stix_timestamp(timestamp_str):
+    """Parses a STIX timestamp string into date and time objects (UTC)."""
     if not timestamp_str or not isinstance(timestamp_str, str): return None, None
     try:
+        # Use isoparse for robust ISO 8601 parsing
         dt_obj = isoparse(timestamp_str)
-        if dt_obj.tzinfo is None: dt_obj = dt_obj.replace(tzinfo=timezone.utc)
-        else: dt_obj = dt_obj.astimezone(timezone.utc)
+        # Ensure timezone is UTC
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+        else:
+            dt_obj = dt_obj.astimezone(timezone.utc)
+        # Return date and time (naive, as UTC is handled)
         return dt_obj.date(), dt_obj.time().replace(tzinfo=None)
-    except ValueError: return None, None
+    except ValueError:
+        # Handle cases where parsing fails
+        return None, None
 
 def generate_maps_link(lat, lon):
     """Generates a Google Maps link from latitude and longitude."""
     try:
         lat_f = float(lat); lon_f = float(lon)
-        return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
-    except (ValueError, TypeError, AttributeError): return None
+        # Basic Google Maps URL format
+        return f"https://www.google.com/maps?q={lat_f},{lon_f}"
+    except (ValueError, TypeError, AttributeError):
+        # Handle invalid input gracefully
+        return None
 
 def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
-    """Generates Streamlit form widgets for a given STIX object type."""
-    data = obj_data or {}
-    form_values = {}
-    # --- Handle objects without 'name' or 'description' ---
+    """
+    Generates Streamlit form widgets dynamically based on the STIX object type.
+
+    Args:
+        obj_type (str): The type of the STIX object (e.g., 'attack-pattern').
+        obj_data (dict, optional): Existing data for the object (used for editing). Defaults to None.
+        key_prefix (str, optional): Prefix for widget keys to ensure uniqueness ('add' or 'edit'). Defaults to "add".
+
+    Returns:
+        dict: A dictionary containing the values entered into the generated form fields.
+              The keys correspond to the STIX property names or derived form field names.
+    """
+    data = obj_data or {} # Use provided data or an empty dict
+    form_values = {} # Dictionary to store the input values
+
+    # --- Handle objects without standard 'name' or 'description' ---
+    # Certain SCOs or specific SDOs might use different primary identifiers.
     if obj_type in ['x509-certificate', 'domain-name', 'note', 'malware-analysis']: # Added malware-analysis
-        display_label = _get_default(data, 'value', _get_default(data, 'serial_number', _get_default(data, 'subject', _get_default(data, 'abstract', _get_default(data, 'product', f"New {obj_type}"))))) # MA uses 'product'
+        # Determine a suitable display label based on available fields
+        display_label = _get_default(data, 'value', # domain-name
+                        _get_default(data, 'serial_number', # x509-certificate
+                        _get_default(data, 'subject', # x509-certificate fallback
+                        _get_default(data, 'abstract', # note
+                        _get_default(data, 'product', # malware-analysis
+                        f"New {obj_type}"))))) # Default label
         st.markdown(f"**{obj_type.replace('-', ' ').title()}:** {display_label}")
-        # Show name/desc for Software, but not others in this list
+        # Show name/desc specifically for Software, even though it's in this list (it has standard name/desc)
         if obj_type == 'software':
             form_values['name'] = st.text_input("Name (Required)", value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
             form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
     else: # SDOs/SCOs that typically have name/description
+        # Determine if 'name' is mandatory for this object type
         name_required = obj_type in [
             'intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability',
             'campaign', 'identity', 'location', 'course-of-action',
             'attack-pattern', 'report', 'software'
             ]
         name_label = "Name (Required)" if name_required else "Name / Value"
-        form_values['name'] = st.text_input(name_label, value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
+        # Use 'value' as default for SCOs if 'name' is missing
+        default_name_or_value = _get_default(data, 'name', _get_default(data, 'value'))
+        form_values['name'] = st.text_input(name_label, value=default_name_or_value, key=f"{key_prefix}_{obj_type}_name")
         form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
 
     st.subheader(f"{obj_type.replace('-', ' ').title()} Properties")
 
+    # --- Helper function for Date/Time Input ---
     def datetime_input(label, data_key, required=False):
+        """Generates date and time input widgets for a STIX timestamp field."""
         st.markdown(f"**{label}{' (Required)' if required else ''}**")
+        # Parse existing timestamp if available
         default_date, default_time = _parse_stix_timestamp(data.get(data_key))
         col1, col2 = st.columns(2)
-        with col1: form_values[f'{data_key}_date'] = st.date_input("Date", value=default_date, key=f"{key_prefix}_{data_key}_date")
-        with col2: form_values[f'{data_key}_time'] = st.time_input("Time (UTC)", value=default_time or dt_time(0, 0), key=f"{key_prefix}_{data_key}_time", step=3600)
+        with col1:
+            # Date input
+            form_values[f'{data_key}_date'] = st.date_input("Date", value=default_date, key=f"{key_prefix}_{data_key}_date")
+        with col2:
+            # Time input (UTC), default to midnight if no time provided
+            form_values[f'{data_key}_time'] = st.time_input("Time (UTC)", value=default_time or dt_time(0, 0), key=f"{key_prefix}_{data_key}_time", step=3600) # Step by hour
 
+    # --- Helper function for Kill Chain Phase Input ---
     def kill_chain_input(data_key_prefix):
-        # (Keep existing kill chain logic)
+        """Generates widgets for selecting or defining a single kill chain phase."""
         st.markdown("**Kill Chain Phase (Optional - Select One)**")
+        # Define unique keys for widgets within this function call
         kc_name_widget_key = f"{key_prefix}_{data_key_prefix}_kc_name_widget"
         custom_kc_name_widget_key = f"{key_prefix}_{data_key_prefix}_custom_kc_name_input"
         custom_phase_name_widget_key = f"{key_prefix}_{data_key_prefix}_custom_phase_name_input"
         phase_name_select_key = f"{key_prefix}_{data_key_prefix}_phase_name_select"
+
+        # Determine default values based on existing data
         default_kc_name = ""; default_phase_name = ""; is_custom_default = False
         if data.get('kill_chain_phases') and isinstance(data['kill_chain_phases'], list) and data['kill_chain_phases']:
-            first_phase = data['kill_chain_phases'][0]
+            first_phase = data['kill_chain_phases'][0] # Only handle the first phase for simplicity
             default_kc_name = first_phase.get('kill_chain_name', "")
             default_phase_name = first_phase.get('phase_name', "")
-            if default_kc_name not in KILL_CHAIN_NAMES: is_custom_default = True
-            elif not default_kc_name: default_kc_name = ""
+            # Check if the default name is one of the standard ones or custom
+            if default_kc_name not in KILL_CHAIN_NAMES:
+                is_custom_default = True
+            elif not default_kc_name: # Handle empty string case
+                default_kc_name = ""
+
+        # Determine the index for the kill chain name selectbox
         kc_name_index = KILL_CHAIN_NAMES.index("custom") if is_custom_default else (KILL_CHAIN_NAMES.index(default_kc_name) if default_kc_name in KILL_CHAIN_NAMES else 0)
+
+        # Kill Chain Name Selection (Standard or Custom)
         selected_kc_name = st.selectbox("Kill Chain Name", options=KILL_CHAIN_NAMES, index=kc_name_index, key=kc_name_widget_key, help="Select a standard kill chain or 'custom'.")
-        form_values[f'{data_key_prefix}_kc_name'] = selected_kc_name
+        form_values[f'{data_key_prefix}_kc_name'] = selected_kc_name # Store the selection ('', 'lockheed...', 'custom')
+
+        # Conditional widgets based on kill chain name selection
         if selected_kc_name == "custom":
+            # Input fields for custom kill chain and phase names
             custom_kc_val = default_kc_name if is_custom_default else ""
             custom_phase_val = default_phase_name if is_custom_default else ""
             form_values[f'{data_key_prefix}_custom_kc_name'] = st.text_input("Custom Kill Chain Name", value=custom_kc_val, key=custom_kc_name_widget_key, help="Enter custom name (lowercase, hyphenated).")
             form_values[f'{data_key_prefix}_phase_name'] = st.text_input("Custom Phase Name", value=custom_phase_val, key=custom_phase_name_widget_key, help="Enter custom phase name (lowercase, hyphenated).")
-        elif selected_kc_name:
+        elif selected_kc_name: # A standard kill chain name was selected
             available_phases = KILL_CHAIN_PHASES.get(selected_kc_name, [])
             phase_default_val = ""
+            # Set default phase if the existing data matches the selected kill chain
             if data.get('kill_chain_phases') and data['kill_chain_phases']:
                  first_phase = data['kill_chain_phases'][0]
-                 if first_phase.get('kill_chain_name') == selected_kc_name: phase_default_val = first_phase.get('phase_name', "")
+                 if first_phase.get('kill_chain_name') == selected_kc_name:
+                     phase_default_val = first_phase.get('phase_name', "")
+            # Determine index for the phase name selectbox
             phase_name_index = available_phases.index(phase_default_val) if phase_default_val in available_phases else 0
             form_values[f'{data_key_prefix}_phase_name'] = st.selectbox("Phase Name", options=available_phases, index=phase_name_index, key=phase_name_select_key)
-        else: form_values[f'{data_key_prefix}_phase_name'] = None
+        else: # No kill chain selected
+            form_values[f'{data_key_prefix}_phase_name'] = None # No phase can be selected
 
     # --- Type Specific Fields ---
+    # Generate fields based on the object type
     if obj_type == 'attack-pattern':
         form_values['ap_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_ap_aliases")
-        kill_chain_input("ap")
+        kill_chain_input("ap") # Add kill chain input specific to attack-pattern
     elif obj_type == 'campaign': # UPDATED
         form_values['c_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_c_aliases")
         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
@@ -380,11 +443,11 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['ind_pattern_type'] = st.selectbox("Pattern Type (Required)", options=PATTERN_TYPES_OV, index=PATTERN_TYPES_OV.index(_get_default(data, 'pattern_type', "stix")), key=f"{key_prefix}_ind_patt_type")
         form_values['ind_pattern'] = st.text_area("Pattern (Required)", value=_get_default(data, 'pattern'), key=f"{key_prefix}_ind_pattern")
         datetime_input("Valid From", "valid_from", required=True); datetime_input("Valid Until", "valid_until")
-        kill_chain_input("ind")
+        kill_chain_input("ind") # Add kill chain input specific to indicator
     elif obj_type == 'infrastructure': # UPDATED
         form_values['inf_infrastructure_types'] = st.multiselect("Infrastructure Types", options=INFRASTRUCTURE_TYPES_OV[1:], default=data.get('infrastructure_types', []), key=f"{key_prefix}_inf_types")
         form_values['inf_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_inf_aliases")
-        kill_chain_input("inf")
+        kill_chain_input("inf") # Add kill chain input specific to infrastructure
         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
     elif obj_type == 'intrusion-set': # UPDATED
         form_values['is_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_is_aliases")
@@ -400,6 +463,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['loc_city'] = st.text_input("City", value=_get_default(data, 'city'), key=f"{key_prefix}_loc_city")
          form_values['loc_street_address'] = st.text_input("Street Address", value=_get_default(data, 'street_address'), key=f"{key_prefix}_loc_street")
          form_values['loc_postal_code'] = st.text_input("Postal Code", value=_get_default(data, 'postal_code'), key=f"{key_prefix}_loc_postal")
+         # Use number_input for lat/lon/precision for better validation
          form_values['loc_latitude'] = st.number_input("Latitude", value=data.get('latitude'), format="%.6f", key=f"{key_prefix}_loc_lat", help="e.g., 48.8584")
          form_values['loc_longitude'] = st.number_input("Longitude", value=data.get('longitude'), format="%.6f", key=f"{key_prefix}_loc_lon", help="e.g., 2.2945")
          form_values['loc_precision'] = st.number_input("Precision (meters)", value=data.get('precision'), min_value=0.0, format="%.1f", key=f"{key_prefix}_loc_prec")
@@ -407,7 +471,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['mal_malware_types'] = st.multiselect("Malware Types", options=MALWARE_TYPES_OV[1:], default=data.get('malware_types', []), key=f"{key_prefix}_mal_types")
          form_values['mal_is_family'] = st.checkbox("Is Family?", value=data.get('is_family', False), key=f"{key_prefix}_mal_is_family")
          form_values['mal_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_mal_aliases")
-         kill_chain_input("mal")
+         kill_chain_input("mal") # Add kill chain input specific to malware
          datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
          form_values['mal_os_execution_envs_str'] = st.text_area("OS Execution Envs (one per line)", value=_list_to_text(data, 'os_execution_envs'), key=f"{key_prefix}_mal_os")
          form_values['mal_architecture_execution_envs_str'] = st.text_area("Architecture Execution Envs (e.g., x86)", value=_list_to_text(data, 'architecture_execution_envs'), key=f"{key_prefix}_mal_arch")
@@ -456,9 +520,10 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     elif obj_type == 'tool': # UPDATED
          form_values['t_tool_types'] = st.multiselect("Tool Types", options=TOOL_TYPES_OV[1:], default=data.get('tool_types', []), key=f"{key_prefix}_t_types")
          form_values['t_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_t_aliases")
-         kill_chain_input("t")
+         kill_chain_input("t") # Add kill chain input specific to tool
          form_values['t_tool_version'] = st.text_input("Tool Version", value=_get_default(data, 'tool_version'), key=f"{key_prefix}_t_version")
     elif obj_type == 'vulnerability':
+         # Use number_input for CVSS scores
          form_values['vuln_cvssv2_score'] = st.number_input("CVSSv2 Score", value=data.get('cvssV2_score'), min_value=0.0, max_value=10.0, format="%.1f", key=f"{key_prefix}_vuln_cvss2")
          form_values['vuln_cvssv3_score'] = st.number_input("CVSSv3 Score", value=data.get('cvssV3_score'), min_value=0.0, max_value=10.0, format="%.1f", key=f"{key_prefix}_vuln_cvss3")
     elif obj_type == 'x509-certificate':
@@ -474,6 +539,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['cert_subject_public_key_algorithm'] = st.text_input("Subject Public Key Algorithm", value=_get_default(data, 'subject_public_key_algorithm'), key=f"{key_prefix}_cert_subj_pk_algo")
         form_values['cert_subject_public_key_modulus'] = st.text_area("Subject Public Key Modulus", value=_get_default(data, 'subject_public_key_modulus'), key=f"{key_prefix}_cert_subj_pk_mod")
         form_values['cert_subject_public_key_exponent'] = st.number_input("Subject Public Key Exponent", value=data.get('subject_public_key_exponent'), step=1, key=f"{key_prefix}_cert_subj_pk_exp")
+        # Handle JSON input for extensions
         default_ext_json = json.dumps(data.get('x509_v3_extensions'), indent=2) if data.get('x509_v3_extensions') else ""
         form_values['cert_x509_v3_extensions_json'] = st.text_area("X.509 v3 Extensions (JSON)", value=default_ext_json, height=150, key=f"{key_prefix}_cert_ext")
     elif obj_type == 'domain-name':
@@ -488,13 +554,17 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['sw_version'] = st.text_input("Version", value=_get_default(data, 'version'), key=f"{key_prefix}_sw_version")
 
     # --- Common Labels Field (for SDOs/SCOs that support it) ---
+    # Add a 'labels' field for types that support it, excluding relationships, markings, etc.
     if obj_type not in ['relationship', 'marking-definition', 'language-content']:
          form_values[f'{obj_type}_labels_str'] = st.text_area("Labels (Optional, one per line)", value=_list_to_text(data, 'labels'), key=f"{key_prefix}_{obj_type}_labels")
     # --- END Common Labels ---
 
-    # --- External Reference Fields (Only if SDO/Relationship, not SCO/Note/Software/MA) ---
+    # --- External Reference Fields ---
+    # Add fields for a single external reference, applicable to SDOs and Relationships
+    # Exclude SCOs, Note, Software, MalwareAnalysis as they don't directly have this property structure
     if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key', 'malware-analysis']: # Added MA
         st.subheader("External Reference (Optional)")
+        # Get data from the first external reference if it exists
         ext_ref_data = data.get('external_references', [{}])[0]
         form_values['ext_ref_source_name'] = st.text_input("Source Name", value=_get_default(ext_ref_data, 'source_name'), key=f"{key_prefix}_ext_ref_source")
         form_values['ext_ref_description'] = st.text_input("Description", value=_get_default(ext_ref_data, 'description'), key=f"{key_prefix}_ext_ref_desc")
@@ -506,44 +576,78 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
 
 
 def parse_form_data_to_stix_args(form_data, obj_type):
-    """Converts raw form data into a dictionary suitable for stix2 constructors or updates."""
-    obj_args = {}
-    def parse_text_area(text_area_str): return [item.strip() for item in text_area_str.splitlines() if item.strip()]
+    """
+    Converts raw form data from Streamlit widgets into a dictionary suitable
+    for stix2 library constructors or update methods.
+
+    Args:
+        form_data (dict): The dictionary containing values from the form widgets.
+        obj_type (str): The type of the STIX object being parsed.
+
+    Returns:
+        dict: A dictionary of arguments ready to be passed to stix2 functions.
+              Keys are STIX property names, values are formatted appropriately.
+    """
+    obj_args = {} # Dictionary to build arguments for stix2 library
+
+    # --- Helper function to parse multiline text areas into lists ---
+    def parse_text_area(text_area_str):
+        """Splits a multiline string into a list of stripped strings, ignoring empty lines."""
+        return [item.strip() for item in text_area_str.splitlines() if item.strip()]
+
+    # --- Helper function to format date and time into STIX timestamp string ---
     def format_stix_timestamp(date_val, time_val):
-        if date_val is None: return None
+        """Combines date and time objects into a STIX compliant UTC timestamp string."""
+        if date_val is None: return None # Cannot create timestamp without date
+        # Default to midnight if time is not provided
         time_val = time_val or dt_time(0, 0, 0)
         try:
+            # Combine date and time, ensure timezone is UTC
             combined_dt = datetime.combine(date_val, time_val).replace(tzinfo=timezone.utc)
+            # Format according to STIX spec (ISO 8601 with Z)
+            # Use .%f to get microseconds, then slice to get milliseconds
             return combined_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + "Z"
-        except Exception as e: st.error(f"Error combining date/time: {e}"); return None
+        except Exception as e:
+            st.error(f"Error combining date/time: {e}")
+            return None
+
+    # --- Helper function to parse hash strings (e.g., "MD5:...") into dict ---
     def parse_hashes_str(hashes_str):
+        """Parses a multiline string of 'ALGO:hash' into a dictionary."""
         hashes_dict = {}
         for line in hashes_str.splitlines():
             if ':' in line:
-                parts = line.split(':', 1); algo = parts[0].strip().upper(); hash_val = parts[1].strip()
-                if algo in HASH_ALGO_OV and algo != "": hashes_dict[algo] = hash_val
-        return hashes_dict if hashes_dict else None
+                parts = line.split(':', 1)
+                algo = parts[0].strip().upper() # Ensure algo is uppercase
+                hash_val = parts[1].strip()
+                # Only include valid hash algorithms from the vocabulary
+                if algo in HASH_ALGO_OV and algo != "":
+                    hashes_dict[algo] = hash_val
+        return hashes_dict if hashes_dict else None # Return None if empty
 
-    # --- FIXED: Explicitly add 'type' to the arguments ---
+    # --- Explicitly add 'type' to the arguments ---
+    # This was identified as a potential issue in the analysis. Ensure type is always included.
     obj_args['type'] = obj_type
 
-    # Generic Fields (if applicable)
+    # --- Generic Fields (if applicable) ---
+    # Handle common fields like name and description if present in form_data
     if form_data.get('name'): obj_args['name'] = form_data['name']
     if form_data.get('description'): obj_args['description'] = form_data['description']
 
-    # --- ADDED: Parse Common Labels Field ---
-    # Find the labels key (could have type prefix or not)
+    # --- Parse Common Labels Field ---
+    # Find the key for the labels text area (it includes the object type prefix)
     labels_key = next((k for k in form_data if k.endswith('_labels_str')), None)
     if labels_key and form_data.get(labels_key):
         labels_list = parse_text_area(form_data[labels_key])
-        if labels_list: obj_args['labels'] = labels_list
-    # --- END Common Labels Parsing ---
+        if labels_list: obj_args['labels'] = labels_list # Add if not empty
 
-    # Type Specific Parsing
+    # --- Type Specific Parsing ---
+    # Parse fields based on the object type
     if obj_type == 'attack-pattern':
         if form_data.get('ap_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['ap_aliases_str'])
     elif obj_type == 'campaign': # UPDATED
         if form_data.get('c_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['c_aliases_str'])
+        # Format timestamps, add to args only if valid
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
         if form_data.get('c_objective'): obj_args['objective'] = form_data['c_objective']
@@ -552,17 +656,19 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         pass # No other specific fields to parse
     elif obj_type == 'identity':
         if form_data.get('id_identity_class'): obj_args['identity_class'] = form_data['id_identity_class']
-        if form_data.get('id_sectors'): obj_args['sectors'] = form_data['id_sectors']
+        if form_data.get('id_sectors'): obj_args['sectors'] = form_data['id_sectors'] # Multiselect returns list directly
         if form_data.get('id_contact_information'): obj_args['contact_information'] = form_data['id_contact_information']
     elif obj_type == 'indicator': # UPDATED
-        if form_data.get('ind_indicator_types'): obj_args['indicator_types'] = form_data['ind_indicator_types']
-        if form_data.get('ind_pattern_type'): obj_args['pattern_type'] = form_data['ind_pattern_type'] # Required
-        if form_data.get('ind_pattern'): obj_args['pattern'] = form_data['ind_pattern'] # Required
+        if form_data.get('ind_indicator_types'): obj_args['indicator_types'] = form_data['ind_indicator_types'] # Multiselect
+        # Required fields for Indicator
+        if form_data.get('ind_pattern_type'): obj_args['pattern_type'] = form_data['ind_pattern_type']
+        if form_data.get('ind_pattern'): obj_args['pattern'] = form_data['ind_pattern']
         ts = format_stix_timestamp(form_data.get('valid_from_date'), form_data.get('valid_from_time')); # Required
-        if ts: obj_args['valid_from'] = ts
+        if ts: obj_args['valid_from'] = ts # Add if valid
+        # Optional timestamp
         ts = format_stix_timestamp(form_data.get('valid_until_date'), form_data.get('valid_until_time')); obj_args.update({'valid_until': ts} if ts else {})
     elif obj_type == 'infrastructure': # UPDATED
-        if form_data.get('inf_infrastructure_types'): obj_args['infrastructure_types'] = form_data['inf_infrastructure_types']
+        if form_data.get('inf_infrastructure_types'): obj_args['infrastructure_types'] = form_data['inf_infrastructure_types'] # Multiselect
         if form_data.get('inf_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['inf_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
@@ -573,7 +679,7 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('is_goals_str'): obj_args['goals'] = parse_text_area(form_data['is_goals_str'])
         if form_data.get('is_resource_level'): obj_args['resource_level'] = form_data['is_resource_level']
         if form_data.get('is_primary_motivation'): obj_args['primary_motivation'] = form_data['is_primary_motivation']
-        if form_data.get('is_secondary_motivations'): obj_args['secondary_motivations'] = form_data['is_secondary_motivations']
+        if form_data.get('is_secondary_motivations'): obj_args['secondary_motivations'] = form_data['is_secondary_motivations'] # Multiselect
     elif obj_type == 'location':
         if form_data.get('loc_region'): obj_args['region'] = form_data['loc_region']
         if form_data.get('loc_country'): obj_args['country'] = form_data['loc_country']
@@ -581,9 +687,10 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('loc_city'): obj_args['city'] = form_data['loc_city']
         if form_data.get('loc_street_address'): obj_args['street_address'] = form_data['loc_street_address']
         if form_data.get('loc_postal_code'): obj_args['postal_code'] = form_data['loc_postal_code']
+        # Handle float conversion for geo coordinates/precision
         if form_data.get('loc_latitude') is not None:
             try: obj_args['latitude'] = float(form_data['loc_latitude'])
-            except (ValueError, TypeError): pass
+            except (ValueError, TypeError): pass # Ignore if conversion fails
         if form_data.get('loc_longitude') is not None:
              try: obj_args['longitude'] = float(form_data['loc_longitude'])
              except (ValueError, TypeError): pass
@@ -592,7 +699,7 @@ def parse_form_data_to_stix_args(form_data, obj_type):
              except (ValueError, TypeError): pass
     elif obj_type == 'malware': # UPDATED
         if form_data.get('mal_malware_types'): obj_args['malware_types'] = form_data['mal_malware_types'] # Required if not is_family
-        obj_args['is_family'] = form_data.get('mal_is_family', False)
+        obj_args['is_family'] = form_data.get('mal_is_family', False) # Checkbox value
         if form_data.get('mal_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['mal_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
@@ -621,72 +728,84 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('note_content'): obj_args['content'] = form_data['note_content'] # Required
         if form_data.get('note_authors_str'):
             authors = parse_text_area(form_data['note_authors_str'])
-            if authors: obj_args['authors'] = authors
+            if authors: obj_args['authors'] = authors # Add only if list is not empty
         if form_data.get('note_object_refs_str'):
             refs = parse_text_area(form_data['note_object_refs_str'])
-            if refs: obj_args['object_refs'] = refs # Required
+            if refs: obj_args['object_refs'] = refs # Required, add if not empty
     elif obj_type == 'observed-data':
+        # Required fields
         ts = format_stix_timestamp(form_data.get('first_observed_date'), form_data.get('first_observed_time')); obj_args.update({'first_observed': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_observed_date'), form_data.get('last_observed_time')); obj_args.update({'last_observed': ts} if ts else {})
         if form_data.get('obs_number_observed') is not None: obj_args['number_observed'] = form_data['obs_number_observed']
         if form_data.get('obs_object_refs_str'): obj_args['object_refs'] = parse_text_area(form_data['obs_object_refs_str'])
     elif obj_type == 'report': # UPDATED
         # Name and Description handled by generic fields
-        if form_data.get('rep_report_types'): obj_args['report_types'] = form_data['rep_report_types'] # Required
+        # Required fields
+        if form_data.get('rep_report_types'): obj_args['report_types'] = form_data['rep_report_types'] # Multiselect
         ts = format_stix_timestamp(form_data.get('published_date'), form_data.get('published_time')) # Required
         if ts: obj_args['published'] = ts
         if form_data.get('rep_object_refs_str'):
             refs = parse_text_area(form_data['rep_object_refs_str'])
             if refs: obj_args['object_refs'] = refs # Required
     elif obj_type == 'threat-actor':
-        if form_data.get('ta_threat_actor_types'): obj_args['threat_actor_types'] = form_data['ta_threat_actor_types']
+        if form_data.get('ta_threat_actor_types'): obj_args['threat_actor_types'] = form_data['ta_threat_actor_types'] # Required
         if form_data.get('ta_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['ta_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
-        if form_data.get('ta_roles'): obj_args['roles'] = form_data['ta_roles']
+        if form_data.get('ta_roles'): obj_args['roles'] = form_data['ta_roles'] # Multiselect
         if form_data.get('ta_goals_str'): obj_args['goals'] = parse_text_area(form_data['ta_goals_str'])
         if form_data.get('ta_sophistication'): obj_args['sophistication'] = form_data['ta_sophistication']
         if form_data.get('ta_resource_level'): obj_args['resource_level'] = form_data['ta_resource_level']
         if form_data.get('ta_primary_motivation'): obj_args['primary_motivation'] = form_data['ta_primary_motivation']
-        if form_data.get('ta_secondary_motivations'): obj_args['secondary_motivations'] = form_data['ta_secondary_motivations']
-        if form_data.get('ta_personal_motivations'): obj_args['personal_motivations'] = form_data['ta_personal_motivations']
+        if form_data.get('ta_secondary_motivations'): obj_args['secondary_motivations'] = form_data['ta_secondary_motivations'] # Multiselect
+        if form_data.get('ta_personal_motivations'): obj_args['personal_motivations'] = form_data['ta_personal_motivations'] # Multiselect
     elif obj_type == 'tool': # UPDATED
-        if form_data.get('t_tool_types'): obj_args['tool_types'] = form_data['t_tool_types']
+        if form_data.get('t_tool_types'): obj_args['tool_types'] = form_data['t_tool_types'] # Multiselect
         if form_data.get('t_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['t_aliases_str'])
         if form_data.get('t_tool_version'): obj_args['tool_version'] = form_data['t_tool_version']
     elif obj_type == 'vulnerability':
-        if form_data.get('vuln_cvssv2_score') is not None: obj_args['cvssV2_score'] = form_data['vuln_cvssv2_score']
-        if form_data.get('vuln_cvssv3_score') is not None: obj_args['cvssV3_score'] = form_data['vuln_cvssv3_score']
+        # Handle float conversion for CVSS scores
+        if form_data.get('vuln_cvssv2_score') is not None:
+             try: obj_args['cvssV2_score'] = float(form_data['vuln_cvssv2_score'])
+             except (ValueError, TypeError): pass
+        if form_data.get('vuln_cvssv3_score') is not None:
+             try: obj_args['cvssV3_score'] = float(form_data['vuln_cvssv3_score'])
+             except (ValueError, TypeError): pass
     elif obj_type == 'x509-certificate':
-        obj_args['is_self_signed'] = form_data.get('cert_is_self_signed', False)
+        obj_args['is_self_signed'] = form_data.get('cert_is_self_signed', False) # Checkbox
         if form_data.get('cert_hashes_str'):
             hashes = parse_hashes_str(form_data['cert_hashes_str'])
-            if hashes: obj_args['hashes'] = hashes
+            if hashes: obj_args['hashes'] = hashes # Add only if valid hashes found
         if form_data.get('cert_version'): obj_args['version'] = form_data['cert_version']
         if form_data.get('cert_serial_number'): obj_args['serial_number'] = form_data['cert_serial_number']
         if form_data.get('cert_signature_algorithm'): obj_args['signature_algorithm'] = form_data['cert_signature_algorithm']
         if form_data.get('cert_issuer'): obj_args['issuer'] = form_data['cert_issuer']
+        # Timestamps
         ts = format_stix_timestamp(form_data.get('validity_not_before_date'), form_data.get('validity_not_before_time'))
         if ts: obj_args['validity_not_before'] = ts
         ts = format_stix_timestamp(form_data.get('validity_not_after_date'), form_data.get('validity_not_after_time'))
         if ts: obj_args['validity_not_after'] = ts
+        # Subject details
         if form_data.get('cert_subject'): obj_args['subject'] = form_data['cert_subject']
         if form_data.get('cert_subject_public_key_algorithm'): obj_args['subject_public_key_algorithm'] = form_data['cert_subject_public_key_algorithm']
         if form_data.get('cert_subject_public_key_modulus'): obj_args['subject_public_key_modulus'] = form_data['cert_subject_public_key_modulus']
+        # Handle integer conversion for exponent
         if form_data.get('cert_subject_public_key_exponent') is not None:
              try: obj_args['subject_public_key_exponent'] = int(form_data['cert_subject_public_key_exponent'])
              except (ValueError, TypeError): st.warning("Invalid input for public key exponent, expected integer.")
+        # Handle JSON parsing for extensions
         if form_data.get('cert_x509_v3_extensions_json'):
             try:
                 ext_data = json.loads(form_data['cert_x509_v3_extensions_json'])
-                if isinstance(ext_data, dict): obj_args['x509_v3_extensions'] = ext_data
+                if isinstance(ext_data, dict): # Ensure it's a dictionary
+                     obj_args['x509_v3_extensions'] = ext_data
                 else: st.warning("X.509 v3 Extensions input is not valid JSON dictionary, skipping.")
             except json.JSONDecodeError: st.warning("X.509 v3 Extensions input is not valid JSON, skipping.")
     elif obj_type == 'domain-name':
         if form_data.get('domain_value'): obj_args['value'] = form_data['domain_value'] # Required
         if form_data.get('domain_resolves_to_refs_str'):
             refs = parse_text_area(form_data['domain_resolves_to_refs_str'])
-            if refs: obj_args['resolves_to_refs'] = refs
+            if refs: obj_args['resolves_to_refs'] = refs # Add if not empty
     elif obj_type == 'software': # UPDATED
         # Name and description parsed above
         if form_data.get('sw_cpe'): obj_args['cpe'] = form_data['sw_cpe']
@@ -696,41 +815,58 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('sw_version'): obj_args['version'] = form_data['sw_version']
 
     # --- Kill Chain Phase Processing (Applies to relevant types) ---
+    # Map object type to the prefix used in form keys for kill chain fields
     kc_prefix_map = {'attack-pattern': 'ap', 'indicator': 'ind', 'infrastructure': 'inf', 'malware': 'mal', 'tool': 't'}
     kc_prefix = kc_prefix_map.get(obj_type)
     if kc_prefix:
-        selected_kc_name = form_data.get(f'{kc_prefix}_kc_name')
-        phase_name = form_data.get(f'{kc_prefix}_phase_name')
+        selected_kc_name = form_data.get(f'{kc_prefix}_kc_name') # e.g., 'ap_kc_name'
+        phase_name = form_data.get(f'{kc_prefix}_phase_name') # e.g., 'ap_phase_name' or custom input
         final_kc_name = None
-        if selected_kc_name == "custom":
-            final_kc_name = form_data.get(f'{kc_prefix}_custom_kc_name')
-        elif selected_kc_name and selected_kc_name != "custom":
-            final_kc_name = selected_kc_name
-        if final_kc_name and phase_name:
-            obj_args['kill_chain_phases'] = [{'kill_chain_name': final_kc_name.lower().replace(" ", "-"), 'phase_name': phase_name.lower().replace(" ", "-")}]
-        elif 'kill_chain_phases' in obj_args: del obj_args['kill_chain_phases'] # Clear if no valid selection
 
-    # --- External Reference (Only if SDO/Relationship, not SCO/Note/Software/MA) ---
+        # Determine the actual kill chain name (standard or custom)
+        if selected_kc_name == "custom":
+            final_kc_name = form_data.get(f'{kc_prefix}_custom_kc_name') # Get from custom input
+        elif selected_kc_name and selected_kc_name != "custom": # Check it's a standard name and not empty
+            final_kc_name = selected_kc_name
+
+        # If both kill chain name and phase name are valid, construct the kill_chain_phases list
+        if final_kc_name and phase_name:
+            # Ensure names are lowercase and hyphenated as per STIX convention
+            obj_args['kill_chain_phases'] = [{'kill_chain_name': final_kc_name.lower().replace(" ", "-"),
+                                              'phase_name': phase_name.lower().replace(" ", "-")}]
+        elif 'kill_chain_phases' in obj_args:
+            # If selection is no longer valid (e.g., cleared), remove the property
+            del obj_args['kill_chain_phases']
+
+    # --- External Reference Processing ---
+    # Applicable to SDOs/Relationships, excluding SCOs, Note, Software, MalwareAnalysis
     if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key', 'malware-analysis']: # Added MA
         ext_ref_source = form_data.get('ext_ref_source_name')
         ext_ref_desc = form_data.get('ext_ref_description')
         ext_ref_url = form_data.get('ext_ref_url')
         ext_ref_ext_id = form_data.get('ext_ref_external_id')
         ext_ref_hashes_str = form_data.get('ext_ref_hashes_str')
-        if ext_ref_source and (ext_ref_desc or ext_ref_url or ext_ref_ext_id or ext_ref_hashes_str): # Check if any ext ref field has value
-            ext_ref = {"source_name": ext_ref_source}
+
+        # Only create external_references list if at least source_name is provided
+        # and one other field has content.
+        if ext_ref_source and (ext_ref_desc or ext_ref_url or ext_ref_ext_id or ext_ref_hashes_str):
+            ext_ref = {"source_name": ext_ref_source} # Start with required source_name
+            # Add optional fields if they have values
             if ext_ref_desc: ext_ref["description"] = ext_ref_desc
             if ext_ref_url: ext_ref["url"] = ext_ref_url
             if ext_ref_ext_id: ext_ref["external_id"] = ext_ref_ext_id
             if ext_ref_hashes_str:
                 hashes = parse_hashes_str(ext_ref_hashes_str)
-                if hashes: ext_ref["hashes"] = hashes
+                if hashes: ext_ref["hashes"] = hashes # Add hashes dict if valid
+            # Assign the list containing the single reference
             obj_args["external_references"] = [ext_ref]
-        elif "external_references" in obj_args: # Remove if source name is now empty
+        elif "external_references" in obj_args:
+             # If source name was cleared during edit, remove the property
              del obj_args["external_references"]
 
 
-    # Remove keys with empty/None values unless required or specific cases
+    # --- Clean up empty/None optional fields ---
+    # Remove keys with empty/None values unless they are required or specific cases like booleans.
     required_fields = {
         'indicator': ['pattern_type', 'pattern', 'valid_from'],
         'note': ['content', 'object_refs'],
@@ -739,36 +875,44 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         'threat-actor': ['threat_actor_types'],
         'course-of-action': ['name'],
         'malware-analysis': ['product'], # Added MA requirement
-        'x509-certificate': [],
         'domain-name': ['value'],
-        'software': ['name']
+        'software': ['name'],
+        # Add other types and their required fields as needed
     }
-    args_copy = obj_args.copy()
+    # Fields that should be kept even if None/empty (e.g., optional timestamps, booleans)
+    keep_if_empty_or_none = [
+        'first_seen', 'last_seen', 'valid_until', 'published',
+        'first_observed', 'last_observed', 'validity_not_before', 'validity_not_after',
+        'submitted', 'analysis_started', 'analysis_ended', # MA timestamps
+        'is_family', 'is_self_signed' # Booleans
+    ]
+
+    args_copy = obj_args.copy() # Iterate over a copy
     for key, value in args_copy.items():
         is_required = key in required_fields.get(obj_type, [])
-        if key == 'is_family' or key == 'is_self_signed': continue # Booleans, keep False if needed
-        is_timestamp_field = key in ['first_seen', 'last_seen', 'valid_until', 'published', 'first_observed', 'last_observed', 'valid_from', 'validity_not_before', 'validity_not_after', 'submitted', 'analysis_started', 'analysis_ended'] # Added MA timestamps
-        # Remove if not required AND (value is None OR empty string OR empty list)
-        if not is_required and (value is None or value == "" or value == []):
-            # However, keep optional timestamp fields even if None, stix2 library handles this
-            if not is_timestamp_field:
-                 # Check if key exists before deleting (important for edit form)
-                 if key in obj_args:
-                    del obj_args[key]
+        keep_anyway = key in keep_if_empty_or_none
+
+        # Check if the value is considered "empty" (None, empty string, empty list/dict)
+        is_empty = value is None or value == "" or value == [] or value == {}
+
+        # Remove if it's not required, not explicitly kept, AND it's empty
+        if not is_required and not keep_anyway and is_empty:
+            # Check if key exists before deleting (important for edit form)
+            if key in obj_args:
+                del obj_args[key]
 
     return obj_args
 
-
 # --- Main App ---
-# (Rest of the Main App logic remains the same as previous version)
 st.title("STIX 2.1 Visualizer & Editor")
-load_status_placeholder = st.empty()
+load_status_placeholder = st.empty() # Placeholder for loading messages
 
 # --- Sidebar ---
 with st.sidebar:
     # --- ADDED LOGO ---
     logo_uri = get_sidebar_logo_uri()
     if logo_uri:
+        # Display the logo and username using Markdown for better control over layout
         st.markdown(
             f"""
             <div style="display: flex; align-items: center; margin-bottom: 10px;">
@@ -782,54 +926,98 @@ with st.sidebar:
 
     # --- Load Bundle ---
     with st.expander("Load STIX 2.1 Bundle", expanded=True):
+        # File uploader widget
         uploaded_file = st.file_uploader("Upload STIX 2.1 JSON bundle", type=["json"], key="stix_uploader_widget")
+
+        # Update session state if a new file is uploaded
         if uploaded_file is not None and uploaded_file != st.session_state.uploaded_file_state:
             st.session_state.uploaded_file_state = uploaded_file
-            load_status_placeholder.empty()
+            load_status_placeholder.empty() # Clear previous status messages
+            # Reset editing state when a new file is uploaded
             st.session_state.editing_object_id = None; st.session_state.editing_relationship_id = None
+
+        # Button to trigger bundle processing
         process_button = st.button("Load and Process Bundle", disabled=(st.session_state.uploaded_file_state is None), key="load_process_button")
 
     # --- Processing Logic ---
+    # Execute if the process button is clicked and a file is available
     if st.session_state.get("load_process_button") and st.session_state.uploaded_file_state is not None:
+        # Use st.status for progress indication
         with st.status(f"Loading '{st.session_state.uploaded_file_state.name}'...", expanded=True) as status:
-            # (Processing logic remains the same)
             try:
                 current_uploaded_file = st.session_state.uploaded_file_state
                 load_status_placeholder.info(f"Processing '{current_uploaded_file.name}'...")
-                status.write("🔄 Resetting current graph..."); time.sleep(0.1)
+                status.write("🔄 Resetting current graph..."); time.sleep(0.1) # Simulate work
+
+                # Reset session state for graph data and selections
                 st.session_state.objects = []; st.session_state.nodes = []; st.session_state.edges = []
                 st.session_state.current_selection = None; st.session_state.rel_source_sel = None; st.session_state.rel_target_sel = None
                 st.session_state.editing_object_id = None; st.session_state.editing_relationship_id = None
+
                 status.write(f"📖 Reading file '{current_uploaded_file.name}'..."); time.sleep(0.1)
                 bundle_content_bytes = current_uploaded_file.getvalue()
-                if not bundle_content_bytes: status.update(label="Error: Uploaded file is empty.", state="error", expanded=True); load_status_placeholder.error("❌ Error: Uploaded file is empty."); st.stop()
+                if not bundle_content_bytes:
+                    status.update(label="Error: Uploaded file is empty.", state="error", expanded=True)
+                    load_status_placeholder.error("❌ Error: Uploaded file is empty.")
+                    st.stop() # Stop execution if file is empty
+
+                # Decode file content (try UTF-8 with BOM first, then plain UTF-8)
                 try: bundle_content_str = bundle_content_bytes.decode('utf-8-sig')
                 except UnicodeDecodeError:
                     try: bundle_content_str = bundle_content_bytes.decode('utf-8')
-                    except UnicodeDecodeError as decode_e: status.update(label=f"Error decoding file: {decode_e}", state="error", expanded=True); load_status_placeholder.error(f"❌ Error decoding file: Use UTF-8 encoding. Details: {decode_e}"); st.stop()
+                    except UnicodeDecodeError as decode_e:
+                        status.update(label=f"Error decoding file: {decode_e}", state="error", expanded=True)
+                        load_status_placeholder.error(f"❌ Error decoding file: Use UTF-8 encoding. Details: {decode_e}")
+                        st.stop()
+
                 status.write("🧩 Parsing JSON data..."); time.sleep(0.1)
+                # Parse the JSON string
                 try: bundle_json = json.loads(bundle_content_str)
-                except json.JSONDecodeError as json_e: status.update(label=f"JSON Decode Error: {json_e}", state="error", expanded=True); load_status_placeholder.error(f"❌ Invalid JSON: {json_e}"); st.stop()
+                except json.JSONDecodeError as json_e:
+                    status.update(label=f"JSON Decode Error: {json_e}", state="error", expanded=True)
+                    load_status_placeholder.error(f"❌ Invalid JSON: {json_e}")
+                    st.stop()
+
                 status.write("🔬 Parsing STIX objects..."); time.sleep(0.1)
+                # Parse the JSON into a STIX Bundle object using stix2 library
                 try:
+                    # allow_custom=True enables parsing of custom properties/objects
                     bundle = parse(bundle_json, allow_custom=True)
-                    if not isinstance(bundle, Bundle): status.update(label="Error: Parsed data is not a valid STIX Bundle.", state="error", expanded=True); load_status_placeholder.error("❌ Error: File does not contain a valid STIX Bundle object."); st.stop()
-                except Exception as parse_e: status.update(label=f"STIX Parsing Error: {parse_e}", state="error", expanded=True); load_status_placeholder.error(f"❌ Error parsing STIX content: {parse_e}"); st.stop()
+                    if not isinstance(bundle, Bundle):
+                        status.update(label="Error: Parsed data is not a valid STIX Bundle.", state="error", expanded=True)
+                        load_status_placeholder.error("❌ Error: File does not contain a valid STIX Bundle object.")
+                        st.stop()
+                except Exception as parse_e:
+                    status.update(label=f"STIX Parsing Error: {parse_e}", state="error", expanded=True)
+                    load_status_placeholder.error(f"❌ Error parsing STIX content: {parse_e}")
+                    st.stop()
+
                 status.write("🏗️ Building graph elements..."); time.sleep(0.1)
+                # Prepare lists for graph nodes, edges, and raw objects
                 temp_nodes, temp_edges, temp_objects = [], [], []; skipped_objects = 0; processed_count = 0
                 total_objects = len(bundle.objects) if hasattr(bundle, 'objects') and bundle.objects else 0
+
+                # Iterate through objects in the bundle
                 if total_objects > 0:
-                    progress_bar = status.progress(0)
+                    progress_bar = status.progress(0) # Initialize progress bar
                     for i, obj in enumerate(bundle.objects):
                         try:
-                            if not hasattr(obj, 'id') or not hasattr(obj, 'type'): skipped_objects += 1; continue
+                            # Basic check for essential STIX object properties
+                            if not hasattr(obj, 'id') or not hasattr(obj, 'type'):
+                                skipped_objects += 1; continue
+
+                            # Serialize the object to a dictionary
                             obj_dict = json.loads(obj.serialize()); temp_objects.append(obj_dict)
                             obj_type = obj_dict['type']; obj_id = obj_dict['id']
+
+                            # Process relationships into edges
                             if obj_type == 'relationship':
-                                if 'source_ref' in obj_dict and 'target_ref' in obj_dict and 'relationship_type' in obj_dict: temp_edges.append({'data': {'id': obj_id, 'source': obj_dict['source_ref'], 'target': obj_dict['target_ref'], 'label': obj_dict['relationship_type']}})
-                                else: skipped_objects += 1
+                                if 'source_ref' in obj_dict and 'target_ref' in obj_dict and 'relationship_type' in obj_dict:
+                                    temp_edges.append({'data': {'id': obj_id, 'source': obj_dict['source_ref'], 'target': obj_dict['target_ref'], 'label': obj_dict['relationship_type']}})
+                                else: skipped_objects += 1 # Skip incomplete relationships
+                            # Process other objects (SDOs/SCOs) into nodes, excluding marking definitions
                             elif obj_type != 'marking-definition':
-                                # Use value or specific fields for label if name missing
+                                # Determine the label for the node (Name > Value > Specific Fallbacks > ID)
                                 label = obj_dict.get('name', obj_dict.get('value'))
                                 if obj_type == 'x509-certificate' and not label:
                                      label = obj_dict.get('serial_number', obj_dict.get('subject', obj_id))
@@ -838,214 +1026,287 @@ with st.sidebar:
                                 elif obj_type == 'malware-analysis' and not label: # Added MA label
                                      label = obj_dict.get('product', obj_id)
                                 elif not label:
-                                     label = obj_id # Fallback to ID
+                                     label = obj_id # Fallback to ID if no other suitable label found
                                 temp_nodes.append({'data': {'id': obj_id, 'label': label}})
                             processed_count += 1
-                        except Exception as obj_proc_e: skipped_objects += 1
+                        except Exception as obj_proc_e:
+                            # Catch errors during individual object processing
+                            print(f"Error processing object {getattr(obj, 'id', 'UNKNOWN')}: {obj_proc_e}")
+                            skipped_objects += 1
+                        # Update progress bar
                         progress_bar.progress((i + 1) / total_objects, text=f"Processing object {i+1}/{total_objects}")
-                    progress_bar.empty()
+                    progress_bar.empty() # Remove progress bar when done
+
+                # Update session state with the processed data
                 st.session_state.objects = temp_objects; st.session_state.nodes = temp_nodes; st.session_state.edges = temp_edges
+
+                # Display success message
                 success_msg = f"Loaded {len(temp_objects)} objects ({len(temp_nodes)} nodes, {len(temp_edges)} edges)."
                 if skipped_objects > 0: success_msg += f" Skipped {skipped_objects} invalid/unsupported objects."
                 status.update(label="Loading Complete!", state="complete", expanded=False)
                 load_status_placeholder.success(f"✅ {success_msg}")
-                st.rerun()
+                st.rerun() # Rerun to update the graph display
             except Exception as e:
+                # Catch any unexpected errors during the loading process
                 error_label = f"Unexpected Error: {e}"; status.update(label=error_label, state="error", expanded=True); load_status_placeholder.error(f"❌ An unexpected error occurred: {e}")
 
+    # Handle case where process button clicked but no file uploaded
     elif st.session_state.get("load_process_button") and st.session_state.uploaded_file_state is None:
         load_status_placeholder.warning("⚠️ Please upload a file first.")
 
     # --- Add Object ---
     with st.expander("Add STIX Object", expanded=False):
+        # Callback function to update the selected type for the add form
         def update_add_form_type():
             st.session_state.add_form_selected_type = st.session_state.add_obj_type_select_widget
+            # Reset editing state when changing add type
             st.session_state.editing_object_id = None
             st.session_state.editing_relationship_id = None
+
+        # Determine the index of the currently selected type for the selectbox default
         current_add_type_index = 0
-        if st.session_state.add_form_selected_type in ALL_OBJECT_TYPES: current_add_type_index = ALL_OBJECT_TYPES.index(st.session_state.add_form_selected_type)
+        if st.session_state.add_form_selected_type in ALL_OBJECT_TYPES:
+            current_add_type_index = ALL_OBJECT_TYPES.index(st.session_state.add_form_selected_type)
+
+        # Selectbox for choosing the object type to add
         obj_type_selection = st.selectbox("Object Type", ALL_OBJECT_TYPES, key="add_obj_type_select_widget", index=current_add_type_index, on_change=update_add_form_type)
-        add_obj_type = st.session_state.add_form_selected_type
+        add_obj_type = st.session_state.add_form_selected_type # Get the selected type from state
 
         # --- Form for Adding Objects ---
+        # Use a unique form key based on the selected object type
         with st.form(f"add_object_detail_form_{add_obj_type}", clear_on_submit=True):
+            # Generate the form fields dynamically based on the selected type
             add_form_data = generate_object_form_fields(add_obj_type, key_prefix="add")
-            add_obj_submit = st.form_submit_button(f"Create {add_obj_type} Object") # Changed label slightly
+            # Submit button for the add form
+            add_obj_submit = st.form_submit_button(f"Create {add_obj_type} Object")
 
+            # Process form submission
             if add_obj_submit:
                 validation_passed = True; error_messages = []
-                # --- UPDATED Validation ---
+                # --- Basic Required Field Validation ---
+                # Add specific validation checks based on STIX 2.1 requirements
                 if add_obj_type == 'domain-name' and not add_form_data.get('domain_value'):
                     error_messages.append("Domain Name 'Value' is required.")
                     validation_passed = False
-                if add_obj_type == 'note' and not add_form_data.get('note_content'):
-                    error_messages.append("Note 'Content' is required.")
-                    validation_passed = False
-                if add_obj_type == 'note' and not add_form_data.get('note_object_refs_str'):
-                    error_messages.append("Note 'Object Refs' are required.")
-                    validation_passed = False
-                if add_obj_type == 'report' and not add_form_data.get('name'):
-                    error_messages.append("Report 'Name' is required.")
-                    validation_passed = False
-                if add_obj_type == 'report' and not add_form_data.get('rep_report_types'):
-                    error_messages.append("Report 'Report Types' are required.")
-                    validation_passed = False
-                if add_obj_type == 'report' and (not add_form_data.get('published_date')):
-                    error_messages.append("Report 'Published Date' is required.")
-                    validation_passed = False
-                if add_obj_type == 'report' and not add_form_data.get('rep_object_refs_str'):
-                    error_messages.append("Report 'Object Refs' are required.")
-                    validation_passed = False
+                if add_obj_type == 'note':
+                    if not add_form_data.get('note_content'): error_messages.append("Note 'Content' is required."); validation_passed = False
+                    if not add_form_data.get('note_object_refs_str'): error_messages.append("Note 'Object Refs' are required."); validation_passed = False
+                if add_obj_type == 'report':
+                    if not add_form_data.get('name'): error_messages.append("Report 'Name' is required."); validation_passed = False
+                    if not add_form_data.get('rep_report_types'): error_messages.append("Report 'Report Types' are required."); validation_passed = False
+                    if not add_form_data.get('published_date'): error_messages.append("Report 'Published Date' is required."); validation_passed = False
+                    if not add_form_data.get('rep_object_refs_str'): error_messages.append("Report 'Object Refs' are required."); validation_passed = False
                 if add_obj_type == 'software' and not add_form_data.get('name'):
-                    error_messages.append("Software 'Name' is required.")
-                    validation_passed = False
+                    error_messages.append("Software 'Name' is required."); validation_passed = False
                 if add_obj_type == 'course-of-action' and not add_form_data.get('name'):
-                    error_messages.append("Course of Action 'Name' is required.")
-                    validation_passed = False
-                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_product'):
-                    error_messages.append("Malware Analysis 'Product' is required.")
-                    validation_passed = False
-                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_av_result') and not add_form_data.get('ma_analysis_sco_refs_str'):
-                    error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'.")
-                    validation_passed = False
-                if add_obj_type == 'indicator' and not add_form_data.get('ind_pattern_type'):
-                     error_messages.append("Indicator 'Pattern Type' is required.")
-                     validation_passed = False
-                if add_obj_type == 'indicator' and not add_form_data.get('ind_pattern'):
-                     error_messages.append("Indicator 'Pattern' is required.")
-                     validation_passed = False
-                if add_obj_type == 'indicator' and not add_form_data.get('valid_from_date'):
-                     error_messages.append("Indicator 'Valid From Date' is required.")
-                     validation_passed = False
-                if add_obj_type == 'observed-data' and (not add_form_data.get('first_observed_date') or not add_form_data.get('last_observed_date') or not add_form_data.get('obs_number_observed') or not add_form_data.get('obs_object_refs_str')):
-                     error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'.")
-                     validation_passed = False
+                    error_messages.append("Course of Action 'Name' is required."); validation_passed = False
+                if add_obj_type == 'malware-analysis':
+                    if not add_form_data.get('ma_product'): error_messages.append("Malware Analysis 'Product' is required."); validation_passed = False
+                    if not add_form_data.get('ma_av_result') and not add_form_data.get('ma_analysis_sco_refs_str'): error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'."); validation_passed = False
+                if add_obj_type == 'indicator':
+                     if not add_form_data.get('ind_pattern_type'): error_messages.append("Indicator 'Pattern Type' is required."); validation_passed = False
+                     if not add_form_data.get('ind_pattern'): error_messages.append("Indicator 'Pattern' is required."); validation_passed = False
+                     if not add_form_data.get('valid_from_date'): error_messages.append("Indicator 'Valid From Date' is required."); validation_passed = False
+                if add_obj_type == 'observed-data':
+                     if not add_form_data.get('first_observed_date') or not add_form_data.get('last_observed_date') or not add_form_data.get('obs_number_observed') or not add_form_data.get('obs_object_refs_str'):
+                         error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'."); validation_passed = False
                 if add_obj_type == 'threat-actor' and not add_form_data.get('ta_threat_actor_types'):
-                     error_messages.append("Threat Actor 'Threat Actor Types' are required.")
-                     validation_passed = False
+                     error_messages.append("Threat Actor 'Threat Actor Types' are required."); validation_passed = False
                 if add_obj_type == 'malware': # Added specific Malware validation
                     if not add_form_data.get('mal_is_family', False) and not add_form_data.get('mal_malware_types'):
-                         error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked.")
-                         validation_passed = False
+                         error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked."); validation_passed = False
+                    # Malware family must have a name
                     if add_form_data.get('mal_is_family', False) and not add_form_data.get('name'):
-                         error_messages.append("Malware 'Name' is required when 'Is Family' is checked.")
-                         validation_passed = False
+                         error_messages.append("Malware 'Name' is required when 'Is Family' is checked."); validation_passed = False
                 # --- End Validation ---
-                if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
 
-                if validation_passed and add_form_data: # Check if form data exists
+                # Display validation errors if any
+                if not validation_passed:
+                    for msg in error_messages: st.error(msg)
+
+                # Proceed if validation passed and form data exists
+                if validation_passed and add_form_data:
+                    # Generate a new STIX ID
                     obj_id = f"{add_obj_type}--{uuid.uuid4()}"
+                    # Parse the form data into arguments suitable for stix2 library
                     obj_args = parse_form_data_to_stix_args(add_form_data, add_obj_type)
-                    # ID added within parse_form_data_to_stix_args now
+                    # Ensure the generated ID is included
                     obj_args['id'] = obj_id
                     try:
-                        # Use generic parse for all types now, relying on allow_custom
-                        # Pass allow_custom directly to parse()
+                        # Use stix2.parse() to create the object instance.
+                        # allow_custom=True handles custom properties and potentially SCOs not explicitly mapped.
                         stix_obj = parse(obj_args, allow_custom=True)
+
+                        # Handle cases where parse might return a dict (e.g., for custom objects)
                         if isinstance(stix_obj, dict):
                              obj_dict = stix_obj
                              # Ensure essential keys are present even if parse returns dict
                              obj_dict['id'] = obj_args['id']
                              obj_dict['type'] = add_obj_type
                         else:
+                             # Serialize the created stix2 object back to a dictionary
                              obj_dict = json.loads(stix_obj.serialize())
 
+                        # Add the new object dictionary to the session state list
                         st.session_state.objects.append(obj_dict)
-                        # Determine label for node
+
+                        # Determine label for the new graph node
                         label = obj_args.get('name', obj_args.get('value')) # Use value for SCOs if name missing
-                        if obj_type == 'x509-certificate' and not label:
+                        if add_obj_type == 'x509-certificate' and not label:
                             label = obj_args.get('serial_number', obj_args.get('subject', obj_id))
-                        elif obj_type == 'note' and not label:
+                        elif add_obj_type == 'note' and not label:
                             label = obj_args.get('abstract', obj_id) # Use abstract for note
-                        elif obj_type == 'malware-analysis' and not label:
+                        elif add_obj_type == 'malware-analysis' and not label:
                              label = obj_args.get('product', obj_id) # Use product for MA
                         elif not label:
-                            label = obj_id
+                            label = obj_id # Fallback to ID
+
+                        # Add the new node to the graph data in session state
                         st.session_state.nodes.append({'data': { 'id': obj_id, 'label': label }})
                         st.success(f"Created {add_obj_type}: {label}")
 
-                        # --- Generate Maps Link AFTER submission ---
+                        # --- Generate Maps Link AFTER successful submission ---
                         if add_obj_type == "location":
                             lat = add_form_data.get("loc_latitude")
                             lon = add_form_data.get("loc_longitude")
                             maps_url = generate_maps_link(lat, lon)
                             if maps_url:
-                                st.session_state.map_url_to_display = maps_url # Store URL to display outside form
+                                # Store URL in session state to display outside the form context
+                                st.session_state.map_url_to_display = maps_url
                             else:
                                 st.session_state.map_url_to_display = None
                                 st.warning("Could not generate maps link: Invalid or missing Latitude/Longitude.")
                         else:
+                            # Clear any previous map URL if the added object is not a location
                             st.session_state.map_url_to_display = None
                         # --- End Maps Link Generation ---
 
+                        # Update default selections for relationship creation if needed
                         if len(st.session_state.nodes) >= 1: st.session_state.rel_source_sel = st.session_state.nodes[0]['data']['id']
                         if len(st.session_state.nodes) >= 2: st.session_state.rel_target_sel = st.session_state.nodes[1]['data']['id']
-                        else: st.session_state.rel_target_sel = None
-                        st.rerun()
+                        else: st.session_state.rel_target_sel = None # Reset target if only one node
+
+                        st.rerun() # Rerun to update the graph and potentially show map link
+
+                    # Catch specific stix2 validation errors
                     except InvalidValueError as ve: st.error(f"STIX Validation Error creating '{obj_args.get('name', obj_args.get('value', obj_id))}': {ve}")
-                    except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}") # Catch specific error
+                    except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}")
+                    # Catch general errors during object creation
                     except Exception as creation_e: st.error(f"Error creating STIX object '{obj_args.get('name', obj_args.get('value', obj_id))}': {creation_e}")
 
     # --- Create Relationship ---
-    # (Keep existing Create Relationship logic)
     with st.expander("Create Relationship", expanded=False):
+        # Filter eligible nodes (SDOs/SCOs, not relationships or markings)
         eligible_nodes = [o for o in st.session_state.objects if o.get('type') not in ['relationship', 'marking-definition']]
+        # Create options dictionary for selectboxes {id: "Label (type)"}
         node_options = {o['id']: f"{o.get('name', o.get('value', o.get('id', 'ID Missing')))} ({o.get('type', 'Type Missing')})" for o in eligible_nodes}
-        if not eligible_nodes or len(eligible_nodes) < 2: st.info("Add at least two graph objects first.")
+
+        # Check if enough nodes exist to create a relationship
+        if not eligible_nodes or len(eligible_nodes) < 2:
+            st.info("Add at least two graph objects (excluding relationships/markings) first.")
         else:
-            node_ids = list(node_options.keys()); default_source_index = 0; default_target_index = 0
-            if st.session_state.get('rel_source_sel') in node_ids: default_source_index = node_ids.index(st.session_state.rel_source_sel)
+            node_ids = list(node_options.keys())
+            # Determine default indices for source and target selectboxes based on state or defaults
+            default_source_index = 0; default_target_index = 0
+            if st.session_state.get('rel_source_sel') in node_ids:
+                default_source_index = node_ids.index(st.session_state.rel_source_sel)
+            # Try to set a different default target
             if len(node_ids) > 1:
-                 potential_target_index = 1
-                 if st.session_state.get('rel_target_sel') in node_ids: potential_target_index = node_ids.index(st.session_state.rel_target_sel)
-                 if potential_target_index != default_source_index: default_target_index = potential_target_index
-                 elif default_source_index == 0: default_target_index = 1
-                 else: default_target_index = 0
-            default_source_index = max(0, min(default_source_index, len(node_ids) - 1)); default_target_index = max(0, min(default_target_index, len(node_ids) - 1))
+                 potential_target_index = 1 # Default to second node if first is source
+                 if st.session_state.get('rel_target_sel') in node_ids:
+                     potential_target_index = node_ids.index(st.session_state.rel_target_sel)
+                 # Ensure target is different from source
+                 if potential_target_index != default_source_index:
+                     default_target_index = potential_target_index
+                 elif default_source_index == 0: # If source is first, target is second
+                     default_target_index = 1
+                 else: # If source is not first, target can be first
+                     default_target_index = 0
+            # Ensure indices are within bounds
+            default_source_index = max(0, min(default_source_index, len(node_ids) - 1))
+            default_target_index = max(0, min(default_target_index, len(node_ids) - 1))
+
+            # Callback to update session state when source/target selection changes
             def update_rel_sel(source_key, target_key):
-                st.session_state.rel_source_sel = st.session_state[source_key]; st.session_state.rel_target_sel = st.session_state[target_key]
-                st.session_state.editing_object_id = None; st.session_state.editing_relationship_id = None
+                st.session_state.rel_source_sel = st.session_state[source_key]
+                st.session_state.rel_target_sel = st.session_state[target_key]
+                # Reset editing state when changing relationship selections
+                st.session_state.editing_object_id = None
+                st.session_state.editing_relationship_id = None
+
+            # Source and Target selection widgets
             selected_source_id = st.selectbox("Source Object", options=node_ids, format_func=node_options.get, key="rel_source_select_widget", index=default_source_index, on_change=update_rel_sel, args=("rel_source_select_widget", "rel_target_select_widget"))
             selected_target_id = st.selectbox("Target Object", options=node_ids, format_func=node_options.get, key="rel_target_select_widget", index=default_target_index, on_change=update_rel_sel, args=("rel_source_select_widget", "rel_target_select_widget"))
+
+            # Determine valid relationship types based on selected source and target types
             valid_rel_types_for_pair = []; rel_type_select_disabled = True; message = ""
             current_source_id = selected_source_id; current_target_id = selected_target_id
             if current_source_id and current_target_id:
-                if current_source_id == current_target_id: message = "Source and Target cannot be the same."
+                if current_source_id == current_target_id:
+                    message = "Source and Target cannot be the same." # Prevent self-relationships via UI
                 else:
-                    source_type = get_object_type_from_id(current_source_id); target_type = get_object_type_from_id(current_target_id)
+                    source_type = get_object_type_from_id(current_source_id)
+                    target_type = get_object_type_from_id(current_target_id)
                     if source_type and target_type:
-                        key = (source_type, target_type); valid_rel_types_for_pair = HARDCODED_VALID_RELATIONSHIPS.get(key, [])
-                        if valid_rel_types_for_pair: rel_type_select_disabled = False
-                        else: message = f"No valid relationship types for {source_type} -> {target_type}."
-                    else: message = "Could not determine object types."
-            if message and rel_type_select_disabled and current_source_id != current_target_id: st.warning(message)
+                        key = (source_type, target_type)
+                        # Look up valid types from the hardcoded dictionary
+                        valid_rel_types_for_pair = HARDCODED_VALID_RELATIONSHIPS.get(key, [])
+                        if valid_rel_types_for_pair:
+                            rel_type_select_disabled = False # Enable selectbox if types exist
+                        else:
+                            message = f"No standard relationship types defined for {source_type} -> {target_type}."
+                    else:
+                        message = "Could not determine object types for relationship validation."
+
+            # Display warning if no valid relationship types found (and source/target differ)
+            if message and rel_type_select_disabled and current_source_id != current_target_id:
+                st.warning(message)
+
+            # Form for submitting the relationship creation
             with st.form("create_relationship_submit_form", clear_on_submit=True):
+                # Relationship type selection (disabled if no valid types)
                 selected_rel_type = st.selectbox("Relationship Type", options=valid_rel_types_for_pair, disabled=rel_type_select_disabled, key="rel_type_select_in_form", index=0 if valid_rel_types_for_pair else None)
+                # Optional relationship description
                 rel_description = st.text_area("Relationship Description (Optional)", key="rel_desc_input_in_form")
+                # Submit button (disabled if no valid types)
                 create_rel_button = st.form_submit_button("Create Relationship", disabled=rel_type_select_disabled)
+
+                # Process relationship creation on submit
                 if create_rel_button:
-                    form_source_id = st.session_state.rel_source_select_widget; form_target_id = st.session_state.rel_target_select_widget
-                    form_rel_type = st.session_state.rel_type_select_in_form; form_rel_desc = st.session_state.rel_desc_input_in_form
+                    # Get values from state (widgets inside form update state on interaction)
+                    form_source_id = st.session_state.rel_source_select_widget
+                    form_target_id = st.session_state.rel_target_select_widget
+                    form_rel_type = st.session_state.rel_type_select_in_form
+                    form_rel_desc = st.session_state.rel_desc_input_in_form
+
+                    # Validate selections before creating
                     if form_source_id and form_target_id and form_source_id != form_target_id and form_rel_type:
-                        rel_id = f"relationship--{uuid.uuid4()}"
-                        rel = {'type': 'relationship', 'id': rel_id, 'spec_version': '2.1', 'relationship_type': form_rel_type, 'source_ref': form_source_id, 'target_ref': form_target_id}
-                        if form_rel_desc: rel['description'] = form_rel_desc
+                        rel_id = f"relationship--{uuid.uuid4()}" # Generate relationship ID
+                        # Construct the relationship dictionary
+                        rel = {'type': 'relationship', 'id': rel_id, 'spec_version': '2.1',
+                               'relationship_type': form_rel_type,
+                               'source_ref': form_source_id, 'target_ref': form_target_id}
+                        if form_rel_desc: rel['description'] = form_rel_desc # Add description if provided
+                        # Add relationship object and edge to session state
                         st.session_state.objects.append(rel)
                         st.session_state.edges.append({'data': {'id': rel_id, 'source': form_source_id, 'target': form_target_id, 'label': form_rel_type}})
                         st.success(f"Created relationship '{form_rel_type}'")
-                        st.rerun()
+                        st.rerun() # Update graph
                     else:
-                         if not form_rel_type: st.error("Cannot create relationship: No valid type.")
-                         elif form_source_id == form_target_id: st.error("Cannot create relationship: Source/Target same.")
-                         else: st.error("Cannot create relationship. Check selections.")
+                         # Provide specific error messages
+                         if not form_rel_type: st.error("Cannot create relationship: No valid type selected or available.")
+                         elif form_source_id == form_target_id: st.error("Cannot create relationship: Source and Target cannot be the same.")
+                         else: st.error("Cannot create relationship. Check Source, Target, and Type selections.")
 
     # --- Edit Object Form ---
+    # Expander is open if an object is currently being edited
     with st.expander("Edit Selected Object", expanded=(st.session_state.editing_object_id is not None)):
         if st.session_state.editing_object_id:
+            # Find the object to edit in the session state list
             object_to_edit = next((o for o in st.session_state.objects if o.get('id') == st.session_state.editing_object_id), None)
             if object_to_edit:
                 edit_obj_type = object_to_edit.get('type', 'unknown')
-                # Use appropriate label for certs and domain names
+                # Determine display label for the object being edited
                 edit_label = object_to_edit.get('name', object_to_edit.get('value', st.session_state.editing_object_id)) # Use value for SCOs
                 if edit_obj_type == 'x509-certificate':
                     edit_label = object_to_edit.get('serial_number', object_to_edit.get('subject', st.session_state.editing_object_id))
@@ -1054,106 +1315,102 @@ with st.sidebar:
                 elif edit_obj_type == 'malware-analysis':
                      edit_label = object_to_edit.get('product', st.session_state.editing_object_id)
 
-
                 st.info(f"Editing: {edit_label} ({edit_obj_type})")
+                # Container with specific styling for the edit form
                 st.markdown('<div class="edit-form-container">', unsafe_allow_html=True)
-                # --- Ensure Edit Form has Submit Button ---
+                # Form for editing the object
                 with st.form(f"edit_object_form_{st.session_state.editing_object_id}", clear_on_submit=False): # Keep values on submit for feedback
+                    # Generate form fields pre-filled with existing object data
                     edit_form_data = generate_object_form_fields(edit_obj_type, obj_data=object_to_edit, key_prefix="edit")
-                    update_obj_submit = st.form_submit_button("Update Object") # Submit button for the edit form
+                    # Submit button for the edit form
+                    update_obj_submit = st.form_submit_button("Update Object")
 
+                    # Process form submission for update
                     if update_obj_submit:
                         validation_passed = True; error_messages = []
-                        # --- UPDATED Validation ---
+                        # --- Re-apply Validation Rules for Edit ---
+                        # (Same validation logic as in the Add form)
                         if edit_obj_type == 'domain-name' and not edit_form_data.get('domain_value'):
-                            error_messages.append("Domain Name 'Value' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'note' and not edit_form_data.get('note_content'):
-                            error_messages.append("Note 'Content' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'note' and not edit_form_data.get('note_object_refs_str'):
-                            error_messages.append("Note 'Object Refs' are required.")
-                            validation_passed = False
-                        if edit_obj_type == 'report' and not edit_form_data.get('name'):
-                            error_messages.append("Report 'Name' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'report' and not edit_form_data.get('rep_report_types'):
-                            error_messages.append("Report 'Report Types' are required.")
-                            validation_passed = False
-                        if edit_obj_type == 'report' and (not edit_form_data.get('published_date')):
-                            error_messages.append("Report 'Published Date' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'report' and not edit_form_data.get('rep_object_refs_str'):
-                            error_messages.append("Report 'Object Refs' are required.")
-                            validation_passed = False
+                            error_messages.append("Domain Name 'Value' is required."); validation_passed = False
+                        if edit_obj_type == 'note':
+                            if not edit_form_data.get('note_content'): error_messages.append("Note 'Content' is required."); validation_passed = False
+                            if not edit_form_data.get('note_object_refs_str'): error_messages.append("Note 'Object Refs' are required."); validation_passed = False
+                        if edit_obj_type == 'report':
+                             if not edit_form_data.get('name'): error_messages.append("Report 'Name' is required."); validation_passed = False
+                             if not edit_form_data.get('rep_report_types'): error_messages.append("Report 'Report Types' are required."); validation_passed = False
+                             if not edit_form_data.get('published_date'): error_messages.append("Report 'Published Date' is required."); validation_passed = False
+                             if not edit_form_data.get('rep_object_refs_str'): error_messages.append("Report 'Object Refs' are required."); validation_passed = False
                         if edit_obj_type == 'software' and not edit_form_data.get('name'):
-                            error_messages.append("Software 'Name' is required.")
-                            validation_passed = False
+                             error_messages.append("Software 'Name' is required."); validation_passed = False
                         if edit_obj_type == 'course-of-action' and not edit_form_data.get('name'):
-                            error_messages.append("Course of Action 'Name' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'malware-analysis' and not edit_form_data.get('ma_product'):
-                            error_messages.append("Malware Analysis 'Product' is required.")
-                            validation_passed = False
-                        if edit_obj_type == 'malware-analysis' and not edit_form_data.get('ma_av_result') and not edit_form_data.get('ma_analysis_sco_refs_str'):
-                            error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'.")
-                            validation_passed = False
-                        if edit_obj_type == 'indicator' and not edit_form_data.get('ind_pattern_type'):
-                             error_messages.append("Indicator 'Pattern Type' is required.")
-                             validation_passed = False
-                        if edit_obj_type == 'indicator' and not edit_form_data.get('ind_pattern'):
-                             error_messages.append("Indicator 'Pattern' is required.")
-                             validation_passed = False
-                        if edit_obj_type == 'indicator' and not edit_form_data.get('valid_from_date'):
-                             error_messages.append("Indicator 'Valid From Date' is required.")
-                             validation_passed = False
-                        if edit_obj_type == 'observed-data' and (not edit_form_data.get('first_observed_date') or not edit_form_data.get('last_observed_date') or not edit_form_data.get('obs_number_observed') or not edit_form_data.get('obs_object_refs_str')):
-                             error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'.")
-                             validation_passed = False
+                             error_messages.append("Course of Action 'Name' is required."); validation_passed = False
+                        if edit_obj_type == 'malware-analysis':
+                             if not edit_form_data.get('ma_product'): error_messages.append("Malware Analysis 'Product' is required."); validation_passed = False
+                             if not edit_form_data.get('ma_av_result') and not edit_form_data.get('ma_analysis_sco_refs_str'): error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'."); validation_passed = False
+                        if edit_obj_type == 'indicator':
+                              if not edit_form_data.get('ind_pattern_type'): error_messages.append("Indicator 'Pattern Type' is required."); validation_passed = False
+                              if not edit_form_data.get('ind_pattern'): error_messages.append("Indicator 'Pattern' is required."); validation_passed = False
+                              if not edit_form_data.get('valid_from_date'): error_messages.append("Indicator 'Valid From Date' is required."); validation_passed = False
+                        if edit_obj_type == 'observed-data':
+                              if not edit_form_data.get('first_observed_date') or not edit_form_data.get('last_observed_date') or not edit_form_data.get('obs_number_observed') or not edit_form_data.get('obs_object_refs_str'):
+                                  error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'."); validation_passed = False
                         if edit_obj_type == 'threat-actor' and not edit_form_data.get('ta_threat_actor_types'):
-                             error_messages.append("Threat Actor 'Threat Actor Types' are required.")
-                             validation_passed = False
-                        if edit_obj_type == 'malware': # Added specific Malware validation
-                            if not edit_form_data.get('mal_is_family', False) and not edit_form_data.get('mal_malware_types'):
-                                 error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked.")
-                                 validation_passed = False
-                            if edit_form_data.get('mal_is_family', False) and not edit_form_data.get('name'):
-                                 error_messages.append("Malware 'Name' is required when 'Is Family' is checked.")
-                                 validation_passed = False
+                              error_messages.append("Threat Actor 'Threat Actor Types' are required."); validation_passed = False
+                        if edit_obj_type == 'malware':
+                             if not edit_form_data.get('mal_is_family', False) and not edit_form_data.get('mal_malware_types'):
+                                  error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked."); validation_passed = False
+                             if edit_form_data.get('mal_is_family', False) and not edit_form_data.get('name'):
+                                  error_messages.append("Malware 'Name' is required when 'Is Family' is checked."); validation_passed = False
                         # --- End Validation ---
-                        if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
 
-                        if validation_passed and edit_form_data: # Check form data exists
+                        # Display errors if validation failed
+                        if not validation_passed:
+                            for msg in error_messages: st.error(msg)
+
+                        # Proceed with update if validation passed and form data exists
+                        if validation_passed and edit_form_data:
                             try:
+                                # Parse the edited form data into stix2 arguments
                                 update_args = parse_form_data_to_stix_args(edit_form_data, edit_obj_type)
+                                # Find the index of the object being edited
                                 obj_index = next((i for i, o in enumerate(st.session_state.objects) if o.get('id') == st.session_state.editing_object_id), -1)
+
                                 if obj_index != -1:
+                                    # Get the original object and create a copy to update
                                     original_obj = st.session_state.objects[obj_index]; updated_obj = original_obj.copy()
+                                    # Update the 'modified' timestamp
                                     updated_obj['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ') # Use timezone.utc
 
-                                    # More robust update: Apply only changed values from update_args
+                                    # Apply changes from the parsed form data (update_args)
+                                    # This overwrites existing values or adds new ones based on the form
                                     for key, value in update_args.items():
                                         updated_obj[key] = value
 
-                                    # Remove keys that are NOT in update_args AND are not base fields
+                                    # Remove keys from the object that are NOT in the parsed form data
+                                    # AND are not essential base fields (id, type, etc.).
+                                    # This handles cases where optional fields were cleared in the form.
                                     base_fields = ['id', 'type', 'spec_version', 'created', 'modified']
                                     keys_to_remove = [k for k in updated_obj if k not in update_args and k not in base_fields]
                                     for k in keys_to_remove:
                                         del updated_obj[k]
 
-                                    # --- FIXED: Add type back into dict before parsing ---
+                                    # --- Ensure 'type' is present before parsing ---
+                                    # parse() requires 'type', make sure it wasn't accidentally removed.
                                     updated_obj['type'] = edit_obj_type
 
-                                    # Validate the updated object using stix2.parse
-                                    # --- FIXED: Removed duplicate allow_custom ---
+                                    # --- Validate the updated object dictionary using stix2.parse ---
+                                    # This ensures the updated object still conforms to the STIX standard.
                                     temp_stix_obj = parse(updated_obj, allow_custom=True)
-                                    validated_obj_dict = json.loads(temp_stix_obj.serialize()) # Use validated dict
+                                    # Serialize the validated object back to ensure consistency
+                                    validated_obj_dict = json.loads(temp_stix_obj.serialize())
 
+                                    # Replace the old object with the validated, updated object in session state
                                     st.session_state.objects[obj_index] = validated_obj_dict
 
-                                    # Update node label in graph data if relevant field changed
+                                    # --- Update node label in graph data if relevant field changed ---
                                     node_index = next((i for i, n in enumerate(st.session_state.nodes) if n['data']['id'] == st.session_state.editing_object_id), -1)
                                     if node_index != -1:
+                                        # Determine the new label based on the updated object data
                                         new_label = validated_obj_dict.get('name', validated_obj_dict.get('value')) # Use value for SCOs
                                         if edit_obj_type == 'x509-certificate' and not new_label:
                                             new_label = validated_obj_dict.get('serial_number', validated_obj_dict.get('subject', st.session_state.editing_object_id))
@@ -1163,11 +1420,12 @@ with st.sidebar:
                                              new_label = validated_obj_dict.get('product', st.session_state.editing_object_id)
                                         elif not new_label:
                                             new_label = st.session_state.editing_object_id # Fallback to ID
+                                        # Update the label in the nodes list
                                         st.session_state.nodes[node_index]['data']['label'] = new_label
 
                                     st.success(f"Updated object: {st.session_state.editing_object_id}")
 
-                                    # --- Generate Maps Link AFTER submission ---
+                                    # --- Generate Maps Link AFTER successful submission ---
                                     if edit_obj_type == "location":
                                         lat = edit_form_data.get("loc_latitude")
                                         lon = edit_form_data.get("loc_longitude")
@@ -1176,82 +1434,128 @@ with st.sidebar:
                                         if not maps_url:
                                             st.warning("Could not generate maps link: Invalid or missing Latitude/Longitude.")
                                     else:
-                                         st.session_state.map_url_to_display = None
+                                         st.session_state.map_url_to_display = None # Clear if not location
                                     # --- End Maps Link Generation ---
 
-                                    st.rerun() # Rerun to reflect changes and potentially show map link
+                                    # Clear editing state after successful update
+                                    # st.session_state.editing_object_id = None # Keep form open for review? Maybe clear on next action.
+                                    st.rerun() # Rerun to reflect changes in graph/sidebar and show map link
+
                                 else: st.error("Error: Could not find object in state to update.")
+                            # Catch validation and other errors during update
                             except InvalidValueError as ve: st.error(f"STIX Validation Error updating object: {ve}")
-                            except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}") # Catch specific error
+                            except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}")
                             except Exception as update_e: st.error(f"Error updating object: {update_e}")
-                st.markdown('</div>', unsafe_allow_html=True)
-            else: st.warning("Selected object not found."); st.session_state.editing_object_id = None
-        else: st.info("Select a single node in the graph to edit its properties.")
+                st.markdown('</div>', unsafe_allow_html=True) # Close the styled container
+            else:
+                # Handle case where the object ID in state is no longer valid
+                st.warning("Selected object not found (it may have been deleted)."); st.session_state.editing_object_id = None
+        else:
+            # Message when no object is selected for editing
+            st.info("Select a single node in the graph to edit its properties.")
 
     # --- Edit Relationship Form ---
-    # (Keep existing Edit Relationship logic)
+    # Expander is open if a relationship is currently being edited
     with st.expander("Edit Selected Relationship", expanded=(st.session_state.editing_relationship_id is not None)):
         if st.session_state.editing_relationship_id:
+            # Find the relationship object to edit
             rel_to_edit = next((o for o in st.session_state.objects if o.get('id') == st.session_state.editing_relationship_id), None)
+            # Ensure it's actually a relationship object
             if rel_to_edit and rel_to_edit.get('type') == 'relationship':
                 source_ref = rel_to_edit.get('source_ref'); target_ref = rel_to_edit.get('target_ref')
                 current_rel_type = rel_to_edit.get('relationship_type'); current_desc = rel_to_edit.get('description', '')
+
+                # Find the source and target objects to display labels and validate types
                 source_obj = next((o for o in st.session_state.objects if o.get('id') == source_ref), None)
                 target_obj = next((o for o in st.session_state.objects if o.get('id') == target_ref), None)
+
                 if source_obj and target_obj:
-                    source_label = f"{source_obj.get('name', source_ref)} ({source_obj.get('type')})"
-                    target_label = f"{target_obj.get('name', target_ref)} ({target_obj.get('type')})"
+                    # Create display labels for source and target
+                    source_label = f"{source_obj.get('name', source_obj.get('value', source_ref))} ({source_obj.get('type')})"
+                    target_label = f"{target_obj.get('name', target_obj.get('value', target_ref))} ({target_obj.get('type')})"
                     st.info(f"Editing Relationship: {source_label} -> {target_label}")
+
+                    # Determine valid relationship types for this source/target pair
                     source_type = source_obj.get('type'); target_type = target_obj.get('type')
                     valid_rel_types = HARDCODED_VALID_RELATIONSHIPS.get((source_type, target_type), [])
-                    if current_rel_type not in valid_rel_types: valid_rel_types.append(current_rel_type) # Ensure current type is selectable
+                    # Ensure the current relationship type is in the list, even if not standard
+                    if current_rel_type not in valid_rel_types: valid_rel_types.append(current_rel_type)
+                    # Find the index of the current type for the selectbox default
                     rel_type_index = valid_rel_types.index(current_rel_type) if current_rel_type in valid_rel_types else 0
+
+                    # Container with specific styling for the relationship edit form
                     st.markdown('<div class="edit-rel-form-container">', unsafe_allow_html=True)
+                    # Form for editing the relationship
                     with st.form(f"edit_relationship_form_{st.session_state.editing_relationship_id}", clear_on_submit=False):
+                        # Display source and target (disabled)
                         st.text_input("Source", value=source_label, disabled=True); st.text_input("Target", value=target_label, disabled=True)
+                        # Selectbox for the relationship type
                         new_rel_type = st.selectbox("Relationship Type", options=valid_rel_types, index=rel_type_index, key=f"edit_rel_type_{st.session_state.editing_relationship_id}", disabled=not valid_rel_types)
+                        # Text area for the description
                         new_desc = st.text_area("Description", value=current_desc, key=f"edit_rel_desc_{st.session_state.editing_relationship_id}")
-                        update_rel_submit = st.form_submit_button("Update Relationship") # Submit button
+                        # Submit button
+                        update_rel_submit = st.form_submit_button("Update Relationship")
+
+                        # Process relationship update on submit
                         if update_rel_submit:
                             try:
+                                # Find the index of the relationship object and edge in session state
                                 rel_obj_index = next((i for i, o in enumerate(st.session_state.objects) if o.get('id') == st.session_state.editing_relationship_id), -1)
                                 edge_index = next((i for i, e in enumerate(st.session_state.edges) if e['data']['id'] == st.session_state.editing_relationship_id), -1)
+
                                 if rel_obj_index != -1 and edge_index != -1:
+                                    # Update the relationship object dictionary
                                     updated_rel_obj = st.session_state.objects[rel_obj_index].copy()
                                     updated_rel_obj['relationship_type'] = new_rel_type
+                                    # Update or remove description based on input
                                     if new_desc: updated_rel_obj['description'] = new_desc
                                     elif 'description' in updated_rel_obj: del updated_rel_obj['description']
-                                    updated_rel_obj['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ') # Use timezone.utc
+                                    # Update modified timestamp
+                                    updated_rel_obj['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
                                     st.session_state.objects[rel_obj_index] = updated_rel_obj
+
+                                    # Update the corresponding edge label in the graph data
                                     st.session_state.edges[edge_index]['data']['label'] = new_rel_type
                                     st.success(f"Updated relationship: {st.session_state.editing_relationship_id}")
-                                    st.rerun()
+                                    # st.session_state.editing_relationship_id = None # Clear editing state
+                                    st.rerun() # Update graph
                                 else: st.error("Error: Could not find relationship object or edge in state.")
                             except Exception as update_e: st.error(f"Error updating relationship: {update_e}")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                else: st.warning("Could not find source or target object."); st.session_state.editing_relationship_id = None
-            else: st.warning("Selected element is not a relationship or not found."); st.session_state.editing_relationship_id = None
-        else: st.info("Select a single edge (relationship) in the graph to edit its properties.")
+                    st.markdown('</div>', unsafe_allow_html=True) # Close styled container
+                else:
+                    # Handle case where source or target object not found (e.g., deleted)
+                    st.warning("Could not find source or target object for the selected relationship."); st.session_state.editing_relationship_id = None
+            else:
+                # Handle case where selected element is not a relationship or not found
+                st.warning("Selected element is not a relationship or not found."); st.session_state.editing_relationship_id = None
+        else:
+            # Message when no relationship is selected
+            st.info("Select a single edge (relationship) in the graph to edit its properties.")
 
     # --- Remove Selected Element ---
-    # (Keep existing Remove logic)
     with st.expander("Remove Selected Elements", expanded=False):
         elements_to_remove_ids = []
+        # Get the current selection from the graph (nodes and/or edges)
         current_selection = st.session_state.get('current_selection')
         if current_selection and isinstance(current_selection, dict):
+            # Extract IDs from selected nodes and edges
             selected_nodes_data = current_selection.get("nodes", [])
             selected_edges_data = current_selection.get("edges", [])
+            # Handle different formats cytoscape might return
             if selected_nodes_data:
                 if selected_nodes_data and isinstance(selected_nodes_data[0], dict): elements_to_remove_ids.extend([node['id'] for node in selected_nodes_data])
-                else: elements_to_remove_ids.extend(selected_nodes_data)
+                else: elements_to_remove_ids.extend(selected_nodes_data) # Assume list of IDs
             if selected_edges_data:
                 if selected_edges_data and isinstance(selected_edges_data[0], dict): elements_to_remove_ids.extend([edge['id'] for edge in selected_edges_data])
-                else: elements_to_remove_ids.extend(selected_edges_data)
+                else: elements_to_remove_ids.extend(selected_edges_data) # Assume list of IDs
+
+        # If elements are selected for removal
         if elements_to_remove_ids:
-            st.write("Currently selected:")
+            st.write("Currently selected for removal:")
+            # Display the first few selected elements for confirmation
             for elem_id in elements_to_remove_ids[:5]:
                  obj = next((o for o in st.session_state.objects if o.get('id') == elem_id), None); label = elem_id
-                 if obj:
+                 if obj: # Format label for display
                      obj_type_display = obj.get('type', 'N/A').replace('-', ' ').title()
                      obj_name_display = obj.get('name', obj.get('value', elem_id))
                      if obj.get('type') == 'relationship': obj_name_display = f"{obj.get('source_ref', '?')} -> {obj.get('target_ref', '?')}"
@@ -1259,97 +1563,218 @@ with st.sidebar:
                  st.text(f"- {label}")
             if len(elements_to_remove_ids) > 5: st.text(f"... and {len(elements_to_remove_ids) - 5} more.")
             st.markdown("---")
+            # Confirmation button
             if st.button(f"Confirm Removal of {len(elements_to_remove_ids)} Element(s)", key="remove_button_sidebar"):
                 num_removed = len(elements_to_remove_ids); ids_being_removed = set(elements_to_remove_ids)
+                # Call helper function to remove each element and connected relationships
                 for elem_id in elements_to_remove_ids: remove_element(elem_id)
                 st.success(f"Removed {num_removed} element(s).")
+                # Clear selection and potentially editing state if removed element was being edited
                 st.session_state.current_selection = None
                 if st.session_state.editing_object_id in ids_being_removed: st.session_state.editing_object_id = None
                 if st.session_state.editing_relationship_id in ids_being_removed: st.session_state.editing_relationship_id = None
-                st.rerun()
-        else: st.info("Click elements in the graph to select them for removal.")
+                st.rerun() # Update graph
+        else:
+            # Message when no elements are selected
+            st.info("Click elements in the graph to select them for removal.")
 
     # --- Export STIX bundle ---
-    # (Keep existing Export logic)
     with st.expander("Export Bundle", expanded=False):
+        # Button to trigger bundle generation and download
         if st.button("Generate & Download STIX 2.1 Bundle"):
             if not st.session_state.objects: st.warning("No objects to export.")
             else:
                 try:
+                    # Prepare objects for bundling (ensure spec_version is present)
                     bundle_objects_for_export = []
                     for obj in st.session_state.objects:
                          obj_copy = obj.copy()
                          if 'spec_version' not in obj_copy: obj_copy['spec_version'] = '2.1'
                          bundle_objects_for_export.append(obj_copy)
+                    # Create the STIX Bundle object
                     bundle_to_export = Bundle(objects=bundle_objects_for_export, allow_custom=True)
+                    # Serialize the bundle to a pretty-printed JSON string
                     output = bundle_to_export.serialize(pretty=True)
+                    # Provide download button
                     st.download_button(label="Download Bundle JSON", data=output, file_name="stix_bundle.json", mime="application/json", key="download_bundle_button")
                 except Exception as e: st.error(f"Error exporting bundle: {e}")
 
     # --- Display Raw Objects ---
+    # Option to view the raw JSON of objects currently in state (for debugging)
     with st.expander("Show Raw STIX Objects", expanded=False):
          if st.session_state.objects: st.json(st.session_state.objects)
          else: st.info("No objects currently in session state.")
 
 # --- Main Area Content ---
 
-# --- Display Map Link (if generated from last submission) ---
+# --- Display Map Link (if generated from last add/edit submission) ---
 if st.session_state.map_url_to_display:
+    # Display the link using Markdown for styling
     st.markdown(f'<div class="maps-link-container">🗺️ [View Location on Google Maps]({st.session_state.map_url_to_display})</div>', unsafe_allow_html=True)
-    st.session_state.map_url_to_display = None # Clear after displaying once
+    st.session_state.map_url_to_display = None # Clear the state after displaying once
 
 # --- Graph Section ---
-# (Keep existing Graph logic)
+# Header with title and fullscreen toggle button
 header_cols = st.columns([0.85, 0.15])
 with header_cols[0]: st.markdown("#### Graph View", unsafe_allow_html=True)
 with header_cols[1]:
     fullscreen_btn_label = "Exit Full Screen" if st.session_state.fullscreen_mode else "Enter Full Screen"
     if st.button(fullscreen_btn_label, key="fullscreen_toggle"):
         st.session_state.fullscreen_mode = not st.session_state.fullscreen_mode
-        st.rerun()
+        st.rerun() # Rerun to apply fullscreen change
 
+# Adjust graph height based on fullscreen mode
 graph_height = "1200px" if st.session_state.fullscreen_mode else "800px"
+
+# --- Prepare Graph Elements and Stylesheet ---
+# Filter nodes and edges to ensure they are valid dictionaries with required keys
 valid_nodes = [n for n in st.session_state.nodes if isinstance(n, dict) and 'data' in n and 'id' in n['data']]
 valid_edges = [e for e in st.session_state.edges if isinstance(e, dict) and 'data' in e and 'id' in e['data'] and 'source' in e['data'] and 'target' in e['data']]
+# Further filter edges to ensure source and target nodes exist
 valid_node_ids = {n['data']['id'] for n in valid_nodes}
 valid_edges = [e for e in valid_edges if e['data']['source'] in valid_node_ids and e['data']['target'] in valid_node_ids]
+# Combine valid nodes and edges for Cytoscape
 elements = valid_nodes + valid_edges
-# Define stylesheet using fixed light theme colors
+
+# Define Cytoscape stylesheet (fixed light theme)
 stylesheet = [
-    { 'selector': 'node', 'style': { 'label': 'data(label)', 'width': 60, 'height': 60, 'background-fit': 'contain', 'background-color': '#ddd', 'border-width': 1, 'border-color': '#555', 'font-size': '9px', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': 5, 'text-wrap': 'wrap', 'text-max-width': 80, 'color': '#0e1117'}},
-    { 'selector': 'edge', 'style': { 'label': 'data(label)', 'width': 2, 'line-color': '#67a3e0', 'target-arrow-color': '#67a3e0', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'font-size': '9px', 'color': '#555', 'text-rotation': 'autorotate', 'text-background-color': '#ffffff', 'text-background-opacity': 0, 'text-background-padding': '2px'}}, # Opacity 0 for label background
-    { 'selector': ':selected', 'style': { 'border-width': 4, 'border-color': '#e74c3c', 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'background-color': '#f7cac9', 'z-index': 9999 }}
+    # Default node style
+    { 'selector': 'node', 'style': {
+        'label': 'data(label)', 'width': 60, 'height': 60,
+        'background-fit': 'contain', 'background-color': '#ddd', # Default background
+        'border-width': 1, 'border-color': '#555',
+        'font-size': '9px', 'text-valign': 'bottom', 'text-halign': 'center',
+        'text-margin-y': 5, 'text-wrap': 'wrap', 'text-max-width': 80, 'color': '#0e1117'
+    }},
+    # Default edge style
+    { 'selector': 'edge', 'style': {
+        'label': 'data(label)', 'width': 2, 'line-color': '#67a3e0',
+        'target-arrow-color': '#67a3e0', 'target-arrow-shape': 'triangle',
+        'curve-style': 'bezier', 'font-size': '9px', 'color': '#555',
+        'text-rotation': 'autorotate', 'text-background-color': '#ffffff',
+        'text-background-opacity': 0, 'text-background-padding': '2px' # Transparent label background
+    }},
+    # Style for selected elements
+    { 'selector': ':selected', 'style': {
+        'border-width': 4, 'border-color': '#e74c3c', 'line-color': '#e74c3c',
+        'target-arrow-color': '#e74c3c', 'background-color': '#f7cac9', 'z-index': 9999
+    }}
 ]
+# Dynamically add styles for node icons based on types present in the graph
 types_in_graph = set(get_object_type_from_id(n['data']['id']) for n in valid_nodes)
 for t in types_in_graph:
-    if t:
-        data_uri = get_icon_data_uri(t)
-        if data_uri: stylesheet.append({'selector': f'node[id ^= "{t}--"]', 'style': { 'background-image': data_uri, 'background-fit': 'contain', 'background-color': 'transparent', 'background-opacity': 0 }})
+    if t: # Ensure type is not None
+        data_uri = get_icon_data_uri(t) # Get cached icon data URI
+        if data_uri:
+            # Add style rule for nodes of this type to use the icon
+            stylesheet.append({
+                'selector': f'node[id ^= "{t}--"]', # Select nodes whose ID starts with "type--"
+                'style': { 'background-image': data_uri, 'background-fit': 'contain',
+                           'background-color': 'transparent', 'background-opacity': 0 } # Make default background transparent
+            })
 
-if not elements: st.info("Load a STIX bundle or add objects to view the graph."); selected = None
-else: selected = cytoscape(elements=elements, stylesheet=stylesheet, layout={ 'name': 'cose', 'idealEdgeLength': 150, 'nodeOverlap': 20, 'padding': 30, 'animate': False }, width="100%", height=graph_height, selection_type='multiple', key="stix_graph_final")
+# --- Display Cytoscape Graph ---
+if not elements:
+    st.info("Load a STIX bundle or add objects using the sidebar to view the graph.")
+    selected = None # No selection if no elements
+else:
+    # Render the Cytoscape graph component
+    selected = cytoscape(
+        elements=elements,
+        stylesheet=stylesheet,
+        layout={ 'name': 'cose', 'idealEdgeLength': 150, 'nodeOverlap': 20, 'padding': 30, 'animate': False }, # COSE layout
+        width="100%",
+        height=graph_height,
+        selection_type='multiple', # Allow selecting multiple elements
+        key="stix_graph_final" # Unique key for the component
+    )
 
-# --- Process Selection Update (Always run this logic) ---
-# (Keep existing Selection update logic)
+# --- Process Graph Selection Update ---
+# This logic runs on every interaction to update the editing state based on graph selection
 current_selection_in_state = st.session_state.get('current_selection')
 new_editing_object_id = None; new_editing_relationship_id = None; rerun_needed_for_edit_state_change = False
+
+# Check if the selection from the graph component has changed
 if selected is not None and selected != current_selection_in_state:
-    st.session_state.current_selection = selected
+    st.session_state.current_selection = selected # Update selection in state
     selected_nodes = selected.get("nodes", []); selected_edges = selected.get("edges", [])
-    if len(selected_nodes) == 1 and not selected_edges:
+
+    # Logic to determine if an object or relationship should be put into editing mode
+    if len(selected_nodes) == 1 and not selected_edges: # Single node selected
+        # Handle different formats cytoscape might return for selection
         node_id = selected_nodes[0]['id'] if isinstance(selected_nodes[0], dict) else selected_nodes[0]
-        if node_id != st.session_state.editing_object_id: new_editing_object_id = node_id; new_editing_relationship_id = None; rerun_needed_for_edit_state_change = True
-    elif len(selected_edges) == 1 and not selected_nodes:
+        # If the selected node is different from the one currently being edited
+        if node_id != st.session_state.editing_object_id:
+            new_editing_object_id = node_id; new_editing_relationship_id = None # Set new edit target
+            rerun_needed_for_edit_state_change = True
+    elif len(selected_edges) == 1 and not selected_nodes: # Single edge selected
         edge_id = selected_edges[0]['id'] if isinstance(selected_edges[0], dict) else selected_edges[0]
-        if edge_id != st.session_state.editing_relationship_id: new_editing_relationship_id = edge_id; new_editing_object_id = None; rerun_needed_for_edit_state_change = True
+        # If the selected edge is different from the one currently being edited
+        if edge_id != st.session_state.editing_relationship_id:
+            new_editing_relationship_id = edge_id; new_editing_object_id = None # Set new edit target
+            rerun_needed_for_edit_state_change = True
+    # If multiple elements are selected or selection cleared, exit editing mode
     elif st.session_state.editing_object_id is not None or st.session_state.editing_relationship_id is not None:
-        new_editing_object_id = None; new_editing_relationship_id = None; rerun_needed_for_edit_state_change = True
+        new_editing_object_id = None; new_editing_relationship_id = None # Clear edit target
+        rerun_needed_for_edit_state_change = True
+
+    # Rerun the script if the editing state changed OR if the selection changed (not in fullscreen)
     if rerun_needed_for_edit_state_change or (not st.session_state.fullscreen_mode and selected != current_selection_in_state):
-        st.session_state.editing_object_id = new_editing_object_id; st.session_state.editing_relationship_id = new_editing_relationship_id
+        st.session_state.editing_object_id = new_editing_object_id
+        st.session_state.editing_relationship_id = new_editing_relationship_id
         st.rerun()
+
+# Handle case where selection becomes None (cleared)
 elif selected is None and current_selection_in_state is not None:
-     st.session_state.current_selection = None
+     st.session_state.current_selection = None # Update state
+     # If exiting a selection while something was being edited, clear editing state
      if st.session_state.editing_object_id is not None or st.session_state.editing_relationship_id is not None:
          st.session_state.editing_object_id = None; st.session_state.editing_relationship_id = None
+         st.rerun() # Rerun to close edit forms
+     # Rerun even if not editing, to update selection display (unless in fullscreen)
+     elif not st.session_state.fullscreen_mode:
          st.rerun()
-     elif not st.session_state.fullscreen_mode: st.rerun()
+
+# --- Display Selected Object Details (Below Graph) ---
+# This section shows details of the currently selected single node or edge.
+if st.session_state.current_selection and isinstance(st.session_state.current_selection, dict):
+    selected_nodes = st.session_state.current_selection.get("nodes", [])
+    selected_edges = st.session_state.current_selection.get("edges", [])
+
+    # Display details only if exactly one element (node OR edge) is selected
+    if (len(selected_nodes) == 1 and not selected_edges) or (len(selected_edges) == 1 and not selected_nodes):
+        selected_id = None
+        if selected_nodes:
+            selected_id = selected_nodes[0]['id'] if isinstance(selected_nodes[0], dict) else selected_nodes[0]
+        elif selected_edges:
+            selected_id = selected_edges[0]['id'] if isinstance(selected_edges[0], dict) else selected_edges[0]
+
+        if selected_id:
+            selected_obj_data = next((o for o in st.session_state.objects if o.get('id') == selected_id), None)
+            if selected_obj_data:
+                st.subheader("Selected Element Details")
+                # Use Markdown with custom class for styling the details box
+                st.markdown('<div class="selected-node-main">', unsafe_allow_html=True)
+                for key, value in selected_obj_data.items():
+                    # Format key for display (replace underscores, title case)
+                    key_display = key.replace('_', ' ').title()
+                    # Format value for display (handle lists, dicts, etc.)
+                    value_display = value
+                    if isinstance(value, list):
+                        value_display = ", ".join(map(str, value)) if value else " " # Join lists, handle empty
+                    elif isinstance(value, dict):
+                        # Pretty print dictionaries
+                        value_display = f"<pre style='white-space: pre-wrap; word-wrap: break-word; margin: 0;'>{json.dumps(value, indent=2)}</pre>"
+                        st.markdown(f'<span class="selected-node-label-main">{key_display}:</span> {value_display}', unsafe_allow_html=True)
+                        continue # Skip default printing for dicts
+
+                    # Display key-value pair using Markdown spans for styling
+                    st.markdown(f'<span class="selected-node-label-main">{key_display}:</span> {value_display}', unsafe_allow_html=True)
+
+                st.markdown('</div>', unsafe_allow_html=True) # Close the styled container
+            else:
+                st.warning(f"Details not found for selected element ID: {selected_id}")
+    elif len(selected_nodes) > 1 or len(selected_edges) > 1 or (selected_nodes and selected_edges):
+        # Message if multiple elements are selected
+        st.info(f"Multiple elements selected ({len(selected_nodes)} nodes, {len(selected_edges)} edges). Select a single element to view details.")
+
