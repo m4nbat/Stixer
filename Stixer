@@ -9,8 +9,8 @@ import streamlit as st
 # Ensure necessary STIX classes are imported (or rely on generic parsing)
 from stix2 import (Bundle, parse, AttackPattern, Campaign, CourseOfAction, Identity,
                    Indicator, Infrastructure, IntrusionSet, Location, Malware, Note,
-                   ObservedData, Report, ThreatActor, Tool, Vulnerability,MalwareAnalysis)
-from stix2.exceptions import InvalidValueError
+                   ObservedData, Report, ThreatActor, Tool, Vulnerability, MalwareAnalysis)
+from stix2.exceptions import InvalidValueError, MissingPropertiesError # Import specific error
 import uuid
 import json
 from st_cytoscape import cytoscape
@@ -18,8 +18,9 @@ import base64
 import os
 import re
 import io
-import time # Only for minor delays in status updates
+import time # Import time for potential debugging pauses
 from datetime import datetime, time as dt_time, date, timezone # Import timezone
+# Ensure dateutil.parser is imported if used (it is used in _parse_stix_timestamp)
 from dateutil.parser import isoparse
 import urllib.parse
 
@@ -75,7 +76,7 @@ HARDCODED_VALID_RELATIONSHIPS = {
     ('domain-name', 'ipv6-addr'): ['resolves-to'],
 }
 
-# Vocabularies (Keep as is)
+# Vocabularies
 THREAT_ACTOR_TYPES_OV = ["", "activist", "competitor", "crime-syndicate", "criminal", "hacker", "insider-accidental", "insider-disgruntled", "nation-state", "sensationalist", "spy", "terrorist", "unknown"]
 THREAT_ACTOR_ROLES_OV = ["", "agent", "director", "independent", "infrastructure-architect", "infrastructure-operator", "malware-author", "sponsor"]
 THREAT_ACTOR_SOPHISTICATION_OV = ["", "none", "minimal", "intermediate", "advanced", "expert", "innovator", "strategic"]
@@ -100,18 +101,18 @@ INFRASTRUCTURE_TYPES_OV = ["", "amplification", "anonymization", "botnet", "comm
 PATTERN_TYPES_OV = ["stix", "pcre", "sigma", "snort", "suricata", "yara"] # For Indicator
 MALWARE_AV_RESULT_OV = ["", "malicious", "suspicious", "benign", "unknown"] # For Malware Analysis
 
-# Define Object Types List (Add software)
+# Define Object Types List (Add malware-analysis)
 source_types = set(k[0] for k in HARDCODED_VALID_RELATIONSHIPS.keys())
 target_types = set(k[1] for k in HARDCODED_VALID_RELATIONSHIPS.keys())
 hardcoded_types = source_types.union(target_types)
 standard_types = [
     'attack-pattern','campaign','course-of-action','identity',
-    'indicator','infrastructure','intrusion-set','malware','malware-analysis',
+    'indicator','infrastructure','intrusion-set','malware','malware-analysis', # Added malware-analysis
     'observed-data','report','threat-actor','tool','vulnerability',
     'location','note','marking-definition', 'language-content',
     'directory', 'domain-name', 'email-addr', 'email-message', 'file',
     'ipv4-addr', 'ipv6-addr', 'mac-addr', 'mutex', 'network-traffic',
-    'process', 'software', 'url', 'user-account', 'windows-registry-key', # Added software
+    'process', 'software', 'url', 'user-account', 'windows-registry-key',
     'x509-certificate'
 ]
 ALL_OBJECT_TYPES = sorted(list(set(standard_types).union(hardcoded_types)))
@@ -236,6 +237,27 @@ def get_icon_data_uri(obj_type):
         return f"url('data:image/png;base64,{b64}')"
     except Exception as e: print(f"Error reading icon file {icon_to_load}: {e}"); return None
 
+# --- Function to load and encode sidebar logo ---
+@st.cache_data
+def get_sidebar_logo_uri():
+    """Loads the manbat.png logo, encodes it, and returns a data URI string."""
+    try: script_dir = os.path.dirname(__file__)
+    except NameError: script_dir = os.getcwd() # Fallback for environments where __file__ is not defined
+    logo_path = os.path.join(script_dir, 'icons', 'manbat.png')
+    if not os.path.exists(logo_path):
+        print(f"Warning: Logo file not found at {logo_path}")
+        return None
+    try:
+        with open(logo_path, "rb") as f:
+            logo_bytes = f.read()
+        b64_logo = base64.b64encode(logo_bytes).decode('utf-8')
+        return f"data:image/png;base64,{b64_logo}"
+    except Exception as e:
+        print(f"Error reading or encoding logo file {logo_path}: {e}")
+        return None
+# --- END NEW FUNCTION ---
+
+
 # --- Form Generation and Parsing Helpers ---
 
 def _get_default(data, key, default=""):
@@ -280,17 +302,19 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     data = obj_data or {}
     form_values = {}
     # --- Handle objects without 'name' or 'description' ---
-    if obj_type in ['x509-certificate', 'domain-name', 'note', 'software']: # Added software
-        display_label = _get_default(data, 'value', _get_default(data, 'serial_number', _get_default(data, 'subject', _get_default(data, 'abstract', _get_default(data, 'name', f"New {obj_type}"))))) # Software uses 'name'
+    if obj_type in ['x509-certificate', 'domain-name', 'note', 'malware-analysis']: # Added malware-analysis
+        display_label = _get_default(data, 'value', _get_default(data, 'serial_number', _get_default(data, 'subject', _get_default(data, 'abstract', _get_default(data, 'product', f"New {obj_type}"))))) # MA uses 'product'
         st.markdown(f"**{obj_type.replace('-', ' ').title()}:** {display_label}")
-        # Software has name/desc, but let's handle it below
-        if obj_type not in ['software']: # Don't show generic name/desc for cert, domain, note
-            pass
-        else: # Show name/desc for Software
+        # Show name/desc for Software, but not others in this list
+        if obj_type == 'software':
             form_values['name'] = st.text_input("Name (Required)", value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
             form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
-    else: # SDOs that typically have name/description
-        name_required = obj_type in ['intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability', 'campaign', 'identity', 'location', 'course-of-action', 'attack-pattern', 'report']
+    else: # SDOs/SCOs that typically have name/description
+        name_required = obj_type in [
+            'intrusion-set', 'threat-actor', 'malware', 'tool', 'vulnerability',
+            'campaign', 'identity', 'location', 'course-of-action',
+            'attack-pattern', 'report', 'software'
+            ]
         name_label = "Name (Required)" if name_required else "Name / Value"
         form_values['name'] = st.text_input(name_label, value=_get_default(data, 'name'), key=f"{key_prefix}_{obj_type}_name")
         form_values['description'] = st.text_area("Description", value=_get_default(data, 'description'), key=f"{key_prefix}_{obj_type}_desc")
@@ -344,6 +368,9 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['c_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_c_aliases")
         datetime_input("First Seen", "first_seen"); datetime_input("Last Seen", "last_seen")
         form_values['c_objective'] = st.text_area("Objective", value=_get_default(data, 'objective'), key=f"{key_prefix}_c_objective")
+    elif obj_type == 'course-of-action':
+        # Name and Description handled by generic fields at the top
+        pass # No other specific required/optional fields in STIX 2.1 for CoA itself
     elif obj_type == 'identity':
         form_values['id_identity_class'] = st.selectbox("Identity Class", options=IDENTITY_CLASS_OV, index=IDENTITY_CLASS_OV.index(_get_default(data, 'identity_class', "")), key=f"{key_prefix}_id_class")
         form_values['id_sectors'] = st.multiselect("Sectors", options=INDUSTRY_SECTOR_OV[1:], default=data.get('sectors', []), key=f"{key_prefix}_id_sectors")
@@ -367,7 +394,6 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['is_primary_motivation'] = st.selectbox("Primary Motivation", options=ATTACK_MOTIVATION_OV, index=ATTACK_MOTIVATION_OV.index(_get_default(data, 'primary_motivation', "")), key=f"{key_prefix}_is_primary_motivation")
         form_values['is_secondary_motivations'] = st.multiselect("Secondary Motivations", options=ATTACK_MOTIVATION_OV[1:], default=data.get('secondary_motivations', []), key=f"{key_prefix}_is_secondary_motivations")
     elif obj_type == 'location':
-         # --- REMOVED st.button for maps link from here ---
          form_values['loc_region'] = st.selectbox("Region", options=REGION_OV, index=REGION_OV.index(_get_default(data, 'region', "")), key=f"{key_prefix}_loc_region")
          form_values['loc_country'] = st.text_input("Country (ISO 3166-1 alpha-2)", value=_get_default(data, 'country'), key=f"{key_prefix}_loc_country", help="Use 2-letter country code (e.g., US, GB)")
          form_values['loc_administrative_area'] = st.text_input("Administrative Area (e.g., state)", value=_get_default(data, 'administrative_area'), key=f"{key_prefix}_loc_admin_area")
@@ -388,7 +414,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
          form_values['mal_implementation_languages_str'] = st.text_area("Implementation Languages (e.g., c++)", value=_list_to_text(data, 'implementation_languages'), key=f"{key_prefix}_mal_langs")
          form_values['mal_capabilities_str'] = st.text_area("Capabilities (one per line)", value=_list_to_text(data, 'capabilities'), key=f"{key_prefix}_mal_caps")
          form_values['mal_sample_refs_str'] = st.text_area("Sample Refs (STIX IDs, one per line)", value=_list_to_text(data, 'sample_refs'), key=f"{key_prefix}_mal_samples")
-    elif obj_type == 'malware-analysis':
+    elif obj_type == 'malware-analysis': # UPDATED
         form_values['ma_product'] = st.text_input("Product (Required)", value=_get_default(data, 'product'), key=f"{key_prefix}_ma_product")
         form_values['ma_version'] = st.text_input("Product Version", value=_get_default(data, 'version'), key=f"{key_prefix}_ma_version")
         form_values['ma_host_vm_ref'] = st.text_input("Host VM Ref (Software ID)", value=_get_default(data, 'host_vm_ref'), key=f"{key_prefix}_ma_host_vm")
@@ -453,18 +479,21 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     elif obj_type == 'domain-name':
         form_values['domain_value'] = st.text_input("Value (Required)", value=_get_default(data, 'value'), key=f"{key_prefix}_domain_value")
         form_values['domain_resolves_to_refs_str'] = st.text_area("Resolves To Refs (STIX IDs, one per line)", value=_list_to_text(data, 'resolves_to_refs'), key=f"{key_prefix}_domain_resolves")
-    # --- ADDED software ---
-    elif obj_type == 'software':
+    elif obj_type == 'software': # UPDATED
         # Name and description handled above
         form_values['sw_cpe'] = st.text_input("CPE", value=_get_default(data, 'cpe'), key=f"{key_prefix}_sw_cpe")
         form_values['sw_swid'] = st.text_input("SWID", value=_get_default(data, 'swid'), key=f"{key_prefix}_sw_swid")
         form_values['sw_languages_str'] = st.text_area("Languages (one per line)", value=_list_to_text(data, 'languages'), key=f"{key_prefix}_sw_langs")
         form_values['sw_vendor'] = st.text_input("Vendor", value=_get_default(data, 'vendor'), key=f"{key_prefix}_sw_vendor")
         form_values['sw_version'] = st.text_input("Version", value=_get_default(data, 'version'), key=f"{key_prefix}_sw_version")
-    # --- END software ---
 
-    # --- External Reference Fields (Only if SDO/Relationship, not SCO/Note) ---
-    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key']:
+    # --- Common Labels Field (for SDOs/SCOs that support it) ---
+    if obj_type not in ['relationship', 'marking-definition', 'language-content']:
+         form_values[f'{obj_type}_labels_str'] = st.text_area("Labels (Optional, one per line)", value=_list_to_text(data, 'labels'), key=f"{key_prefix}_{obj_type}_labels")
+    # --- END Common Labels ---
+
+    # --- External Reference Fields (Only if SDO/Relationship, not SCO/Note/Software/MA) ---
+    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key', 'malware-analysis']: # Added MA
         st.subheader("External Reference (Optional)")
         ext_ref_data = data.get('external_references', [{}])[0]
         form_values['ext_ref_source_name'] = st.text_input("Source Name", value=_get_default(ext_ref_data, 'source_name'), key=f"{key_prefix}_ext_ref_source")
@@ -495,9 +524,20 @@ def parse_form_data_to_stix_args(form_data, obj_type):
                 if algo in HASH_ALGO_OV and algo != "": hashes_dict[algo] = hash_val
         return hashes_dict if hashes_dict else None
 
+    # --- FIXED: Explicitly add 'type' to the arguments ---
+    obj_args['type'] = obj_type
+
     # Generic Fields (if applicable)
     if form_data.get('name'): obj_args['name'] = form_data['name']
     if form_data.get('description'): obj_args['description'] = form_data['description']
+
+    # --- ADDED: Parse Common Labels Field ---
+    # Find the labels key (could have type prefix or not)
+    labels_key = next((k for k in form_data if k.endswith('_labels_str')), None)
+    if labels_key and form_data.get(labels_key):
+        labels_list = parse_text_area(form_data[labels_key])
+        if labels_list: obj_args['labels'] = labels_list
+    # --- END Common Labels Parsing ---
 
     # Type Specific Parsing
     if obj_type == 'attack-pattern':
@@ -507,6 +547,9 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
         ts = format_stix_timestamp(form_data.get('last_seen_date'), form_data.get('last_seen_time')); obj_args.update({'last_seen': ts} if ts else {})
         if form_data.get('c_objective'): obj_args['objective'] = form_data['c_objective']
+    elif obj_type == 'course-of-action': # UPDATED
+        # Name and Description handled by generic fields
+        pass # No other specific fields to parse
     elif obj_type == 'identity':
         if form_data.get('id_identity_class'): obj_args['identity_class'] = form_data['id_identity_class']
         if form_data.get('id_sectors'): obj_args['sectors'] = form_data['id_sectors']
@@ -548,7 +591,7 @@ def parse_form_data_to_stix_args(form_data, obj_type):
              try: obj_args['precision'] = float(form_data['loc_precision'])
              except (ValueError, TypeError): pass
     elif obj_type == 'malware': # UPDATED
-        if form_data.get('mal_malware_types'): obj_args['malware_types'] = form_data['mal_malware_types']
+        if form_data.get('mal_malware_types'): obj_args['malware_types'] = form_data['mal_malware_types'] # Required if not is_family
         obj_args['is_family'] = form_data.get('mal_is_family', False)
         if form_data.get('mal_aliases_str'): obj_args['aliases'] = parse_text_area(form_data['mal_aliases_str'])
         ts = format_stix_timestamp(form_data.get('first_seen_date'), form_data.get('first_seen_time')); obj_args.update({'first_seen': ts} if ts else {})
@@ -644,15 +687,13 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         if form_data.get('domain_resolves_to_refs_str'):
             refs = parse_text_area(form_data['domain_resolves_to_refs_str'])
             if refs: obj_args['resolves_to_refs'] = refs
-    # --- ADDED software Parsing ---
-    elif obj_type == 'software':
+    elif obj_type == 'software': # UPDATED
         # Name and description parsed above
         if form_data.get('sw_cpe'): obj_args['cpe'] = form_data['sw_cpe']
         if form_data.get('sw_swid'): obj_args['swid'] = form_data['sw_swid']
         if form_data.get('sw_languages_str'): obj_args['languages'] = parse_text_area(form_data['sw_languages_str'])
         if form_data.get('sw_vendor'): obj_args['vendor'] = form_data['sw_vendor']
         if form_data.get('sw_version'): obj_args['version'] = form_data['sw_version']
-    # --- END software Parsing ---
 
     # --- Kill Chain Phase Processing (Applies to relevant types) ---
     kc_prefix_map = {'attack-pattern': 'ap', 'indicator': 'ind', 'infrastructure': 'inf', 'malware': 'mal', 'tool': 't'}
@@ -669,8 +710,8 @@ def parse_form_data_to_stix_args(form_data, obj_type):
             obj_args['kill_chain_phases'] = [{'kill_chain_name': final_kc_name.lower().replace(" ", "-"), 'phase_name': phase_name.lower().replace(" ", "-")}]
         elif 'kill_chain_phases' in obj_args: del obj_args['kill_chain_phases'] # Clear if no valid selection
 
-    # --- External Reference (Only if SDO/Relationship, not SCO/Note) ---
-    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key']:
+    # --- External Reference (Only if SDO/Relationship, not SCO/Note/Software/MA) ---
+    if obj_type not in ['x509-certificate', 'domain-name', 'note', 'software', 'file', 'ipv4-addr', 'ipv6-addr', 'url', 'directory', 'email-addr', 'email-message', 'mac-addr', 'mutex', 'network-traffic', 'process', 'user-account', 'windows-registry-key', 'malware-analysis']: # Added MA
         ext_ref_source = form_data.get('ext_ref_source_name')
         ext_ref_desc = form_data.get('ext_ref_description')
         ext_ref_url = form_data.get('ext_ref_url')
@@ -696,19 +737,24 @@ def parse_form_data_to_stix_args(form_data, obj_type):
         'observed-data': ['first_observed', 'last_observed', 'number_observed', 'object_refs'],
         'report': ['name', 'report_types', 'published', 'object_refs'],
         'threat-actor': ['threat_actor_types'],
+        'course-of-action': ['name'],
         'malware-analysis': ['product'], # Added MA requirement
         'x509-certificate': [],
         'domain-name': ['value'],
-        'software': ['name'] # Name is required for software
+        'software': ['name']
     }
     args_copy = obj_args.copy()
     for key, value in args_copy.items():
         is_required = key in required_fields.get(obj_type, [])
         if key == 'is_family' or key == 'is_self_signed': continue # Booleans, keep False if needed
-        is_timestamp_field = key in ['first_seen', 'last_seen', 'valid_until', 'published', 'first_observed', 'last_observed', 'valid_from', 'validity_not_before', 'validity_not_after']
+        is_timestamp_field = key in ['first_seen', 'last_seen', 'valid_until', 'published', 'first_observed', 'last_observed', 'valid_from', 'validity_not_before', 'validity_not_after', 'submitted', 'analysis_started', 'analysis_ended'] # Added MA timestamps
         # Remove if not required AND (value is None OR empty string OR empty list)
         if not is_required and (value is None or value == "" or value == []):
-            del obj_args[key]
+            # However, keep optional timestamp fields even if None, stix2 library handles this
+            if not is_timestamp_field:
+                 # Check if key exists before deleting (important for edit form)
+                 if key in obj_args:
+                    del obj_args[key]
 
     return obj_args
 
@@ -720,6 +766,20 @@ load_status_placeholder = st.empty()
 
 # --- Sidebar ---
 with st.sidebar:
+    # --- ADDED LOGO ---
+    logo_uri = get_sidebar_logo_uri()
+    if logo_uri:
+        st.markdown(
+            f"""
+            <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                <img src="{logo_uri}" style="height: 40px; width: 40px; border-radius: 50%; margin-right: 10px;">
+                <span style="font-weight: bold; font-size: 1.1em;">@m4nbat</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    # --- END LOGO ---
+
     # --- Load Bundle ---
     with st.expander("Load STIX 2.1 Bundle", expanded=True):
         uploaded_file = st.file_uploader("Upload STIX 2.1 JSON bundle", type=["json"], key="stix_uploader_widget")
@@ -769,14 +829,16 @@ with st.sidebar:
                                 if 'source_ref' in obj_dict and 'target_ref' in obj_dict and 'relationship_type' in obj_dict: temp_edges.append({'data': {'id': obj_id, 'source': obj_dict['source_ref'], 'target': obj_dict['target_ref'], 'label': obj_dict['relationship_type']}})
                                 else: skipped_objects += 1
                             elif obj_type != 'marking-definition':
-                                # Use value or serial_number/subject/abstract for label if name missing
+                                # Use value or specific fields for label if name missing
                                 label = obj_dict.get('name', obj_dict.get('value'))
                                 if obj_type == 'x509-certificate' and not label:
                                      label = obj_dict.get('serial_number', obj_dict.get('subject', obj_id))
                                 elif obj_type == 'note' and not label:
-                                     label = obj_dict.get('abstract', obj_id) # Use abstract for note if name missing
+                                     label = obj_dict.get('abstract', obj_id) # Use abstract for note
+                                elif obj_type == 'malware-analysis' and not label: # Added MA label
+                                     label = obj_dict.get('product', obj_id)
                                 elif not label:
-                                     label = obj_id
+                                     label = obj_id # Fallback to ID
                                 temp_nodes.append({'data': {'id': obj_id, 'label': label}})
                             processed_count += 1
                         except Exception as obj_proc_e: skipped_objects += 1
@@ -812,7 +874,7 @@ with st.sidebar:
 
             if add_obj_submit:
                 validation_passed = True; error_messages = []
-                # --- ADDED Validation ---
+                # --- UPDATED Validation ---
                 if add_obj_type == 'domain-name' and not add_form_data.get('domain_value'):
                     error_messages.append("Domain Name 'Value' is required.")
                     validation_passed = False
@@ -828,8 +890,8 @@ with st.sidebar:
                 if add_obj_type == 'report' and not add_form_data.get('rep_report_types'):
                     error_messages.append("Report 'Report Types' are required.")
                     validation_passed = False
-                if add_obj_type == 'report' and (not add_form_data.get('published_date') or not add_form_data.get('published_time')):
-                    error_messages.append("Report 'Published Date/Time' is required.")
+                if add_obj_type == 'report' and (not add_form_data.get('published_date')):
+                    error_messages.append("Report 'Published Date' is required.")
                     validation_passed = False
                 if add_obj_type == 'report' and not add_form_data.get('rep_object_refs_str'):
                     error_messages.append("Report 'Object Refs' are required.")
@@ -837,27 +899,52 @@ with st.sidebar:
                 if add_obj_type == 'software' and not add_form_data.get('name'):
                     error_messages.append("Software 'Name' is required.")
                     validation_passed = False
-                if add_obj_type == 'course-of-action' and not add_form_data.get('name'): # Added CoA validation
+                if add_obj_type == 'course-of-action' and not add_form_data.get('name'):
                     error_messages.append("Course of Action 'Name' is required.")
                     validation_passed = False
-                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_product'): # Added MA validation
+                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_product'):
                     error_messages.append("Malware Analysis 'Product' is required.")
                     validation_passed = False
-                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_av_result') and not add_form_data.get('ma_analysis_sco_refs_str'): # Added MA validation
+                if add_obj_type == 'malware-analysis' and not add_form_data.get('ma_av_result') and not add_form_data.get('ma_analysis_sco_refs_str'):
                     error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'.")
                     validation_passed = False
+                if add_obj_type == 'indicator' and not add_form_data.get('ind_pattern_type'):
+                     error_messages.append("Indicator 'Pattern Type' is required.")
+                     validation_passed = False
+                if add_obj_type == 'indicator' and not add_form_data.get('ind_pattern'):
+                     error_messages.append("Indicator 'Pattern' is required.")
+                     validation_passed = False
+                if add_obj_type == 'indicator' and not add_form_data.get('valid_from_date'):
+                     error_messages.append("Indicator 'Valid From Date' is required.")
+                     validation_passed = False
+                if add_obj_type == 'observed-data' and (not add_form_data.get('first_observed_date') or not add_form_data.get('last_observed_date') or not add_form_data.get('obs_number_observed') or not add_form_data.get('obs_object_refs_str')):
+                     error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'.")
+                     validation_passed = False
+                if add_obj_type == 'threat-actor' and not add_form_data.get('ta_threat_actor_types'):
+                     error_messages.append("Threat Actor 'Threat Actor Types' are required.")
+                     validation_passed = False
+                if add_obj_type == 'malware': # Added specific Malware validation
+                    if not add_form_data.get('mal_is_family', False) and not add_form_data.get('mal_malware_types'):
+                         error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked.")
+                         validation_passed = False
+                    if add_form_data.get('mal_is_family', False) and not add_form_data.get('name'):
+                         error_messages.append("Malware 'Name' is required when 'Is Family' is checked.")
+                         validation_passed = False
                 # --- End Validation ---
                 if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
 
                 if validation_passed and add_form_data: # Check if form data exists
                     obj_id = f"{add_obj_type}--{uuid.uuid4()}"
                     obj_args = parse_form_data_to_stix_args(add_form_data, add_obj_type)
-                    obj_args['id'] = obj_id; obj_args['allow_custom'] = True
+                    # ID added within parse_form_data_to_stix_args now
+                    obj_args['id'] = obj_id
                     try:
                         # Use generic parse for all types now, relying on allow_custom
+                        # Pass allow_custom directly to parse()
                         stix_obj = parse(obj_args, allow_custom=True)
                         if isinstance(stix_obj, dict):
                              obj_dict = stix_obj
+                             # Ensure essential keys are present even if parse returns dict
                              obj_dict['id'] = obj_args['id']
                              obj_dict['type'] = add_obj_type
                         else:
@@ -870,6 +957,8 @@ with st.sidebar:
                             label = obj_args.get('serial_number', obj_args.get('subject', obj_id))
                         elif obj_type == 'note' and not label:
                             label = obj_args.get('abstract', obj_id) # Use abstract for note
+                        elif obj_type == 'malware-analysis' and not label:
+                             label = obj_args.get('product', obj_id) # Use product for MA
                         elif not label:
                             label = obj_id
                         st.session_state.nodes.append({'data': { 'id': obj_id, 'label': label }})
@@ -894,6 +983,7 @@ with st.sidebar:
                         else: st.session_state.rel_target_sel = None
                         st.rerun()
                     except InvalidValueError as ve: st.error(f"STIX Validation Error creating '{obj_args.get('name', obj_args.get('value', obj_id))}': {ve}")
+                    except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}") # Catch specific error
                     except Exception as creation_e: st.error(f"Error creating STIX object '{obj_args.get('name', obj_args.get('value', obj_id))}': {creation_e}")
 
     # --- Create Relationship ---
@@ -961,6 +1051,9 @@ with st.sidebar:
                     edit_label = object_to_edit.get('serial_number', object_to_edit.get('subject', st.session_state.editing_object_id))
                 elif edit_obj_type == 'note':
                      edit_label = object_to_edit.get('abstract', st.session_state.editing_object_id)
+                elif edit_obj_type == 'malware-analysis':
+                     edit_label = object_to_edit.get('product', st.session_state.editing_object_id)
+
 
                 st.info(f"Editing: {edit_label} ({edit_obj_type})")
                 st.markdown('<div class="edit-form-container">', unsafe_allow_html=True)
@@ -971,7 +1064,7 @@ with st.sidebar:
 
                     if update_obj_submit:
                         validation_passed = True; error_messages = []
-                        # --- ADDED Validation ---
+                        # --- UPDATED Validation ---
                         if edit_obj_type == 'domain-name' and not edit_form_data.get('domain_value'):
                             error_messages.append("Domain Name 'Value' is required.")
                             validation_passed = False
@@ -987,8 +1080,8 @@ with st.sidebar:
                         if edit_obj_type == 'report' and not edit_form_data.get('rep_report_types'):
                             error_messages.append("Report 'Report Types' are required.")
                             validation_passed = False
-                        if edit_obj_type == 'report' and (not edit_form_data.get('published_date') or not edit_form_data.get('published_time')):
-                            error_messages.append("Report 'Published Date/Time' is required.")
+                        if edit_obj_type == 'report' and (not edit_form_data.get('published_date')):
+                            error_messages.append("Report 'Published Date' is required.")
                             validation_passed = False
                         if edit_obj_type == 'report' and not edit_form_data.get('rep_object_refs_str'):
                             error_messages.append("Report 'Object Refs' are required.")
@@ -996,6 +1089,37 @@ with st.sidebar:
                         if edit_obj_type == 'software' and not edit_form_data.get('name'):
                             error_messages.append("Software 'Name' is required.")
                             validation_passed = False
+                        if edit_obj_type == 'course-of-action' and not edit_form_data.get('name'):
+                            error_messages.append("Course of Action 'Name' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'malware-analysis' and not edit_form_data.get('ma_product'):
+                            error_messages.append("Malware Analysis 'Product' is required.")
+                            validation_passed = False
+                        if edit_obj_type == 'malware-analysis' and not edit_form_data.get('ma_av_result') and not edit_form_data.get('ma_analysis_sco_refs_str'):
+                            error_messages.append("Malware Analysis requires either 'AV Result' or 'Analysis SCO Refs'.")
+                            validation_passed = False
+                        if edit_obj_type == 'indicator' and not edit_form_data.get('ind_pattern_type'):
+                             error_messages.append("Indicator 'Pattern Type' is required.")
+                             validation_passed = False
+                        if edit_obj_type == 'indicator' and not edit_form_data.get('ind_pattern'):
+                             error_messages.append("Indicator 'Pattern' is required.")
+                             validation_passed = False
+                        if edit_obj_type == 'indicator' and not edit_form_data.get('valid_from_date'):
+                             error_messages.append("Indicator 'Valid From Date' is required.")
+                             validation_passed = False
+                        if edit_obj_type == 'observed-data' and (not edit_form_data.get('first_observed_date') or not edit_form_data.get('last_observed_date') or not edit_form_data.get('obs_number_observed') or not edit_form_data.get('obs_object_refs_str')):
+                             error_messages.append("Observed Data requires 'First Observed', 'Last Observed', 'Number Observed', and 'Object Refs'.")
+                             validation_passed = False
+                        if edit_obj_type == 'threat-actor' and not edit_form_data.get('ta_threat_actor_types'):
+                             error_messages.append("Threat Actor 'Threat Actor Types' are required.")
+                             validation_passed = False
+                        if edit_obj_type == 'malware': # Added specific Malware validation
+                            if not edit_form_data.get('mal_is_family', False) and not edit_form_data.get('mal_malware_types'):
+                                 error_messages.append("Malware 'Malware Types' are required when 'Is Family' is unchecked.")
+                                 validation_passed = False
+                            if edit_form_data.get('mal_is_family', False) and not edit_form_data.get('name'):
+                                 error_messages.append("Malware 'Name' is required when 'Is Family' is checked.")
+                                 validation_passed = False
                         # --- End Validation ---
                         if error_messages: validation_passed = False; [st.error(msg) for msg in error_messages]
 
@@ -1017,7 +1141,11 @@ with st.sidebar:
                                     for k in keys_to_remove:
                                         del updated_obj[k]
 
+                                    # --- FIXED: Add type back into dict before parsing ---
+                                    updated_obj['type'] = edit_obj_type
+
                                     # Validate the updated object using stix2.parse
+                                    # --- FIXED: Removed duplicate allow_custom ---
                                     temp_stix_obj = parse(updated_obj, allow_custom=True)
                                     validated_obj_dict = json.loads(temp_stix_obj.serialize()) # Use validated dict
 
@@ -1031,6 +1159,8 @@ with st.sidebar:
                                             new_label = validated_obj_dict.get('serial_number', validated_obj_dict.get('subject', st.session_state.editing_object_id))
                                         elif edit_obj_type == 'note' and not new_label:
                                              new_label = validated_obj_dict.get('abstract', st.session_state.editing_object_id)
+                                        elif edit_obj_type == 'malware-analysis' and not new_label:
+                                             new_label = validated_obj_dict.get('product', st.session_state.editing_object_id)
                                         elif not new_label:
                                             new_label = st.session_state.editing_object_id # Fallback to ID
                                         st.session_state.nodes[node_index]['data']['label'] = new_label
@@ -1052,6 +1182,7 @@ with st.sidebar:
                                     st.rerun() # Rerun to reflect changes and potentially show map link
                                 else: st.error("Error: Could not find object in state to update.")
                             except InvalidValueError as ve: st.error(f"STIX Validation Error updating object: {ve}")
+                            except MissingPropertiesError as mpe: st.error(f"STIX Missing Properties Error: {mpe}") # Catch specific error
                             except Exception as update_e: st.error(f"Error updating object: {update_e}")
                 st.markdown('</div>', unsafe_allow_html=True)
             else: st.warning("Selected object not found."); st.session_state.editing_object_id = None
