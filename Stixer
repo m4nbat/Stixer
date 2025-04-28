@@ -575,7 +575,7 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
     return form_values
 
 
-def parse_form_data_to_stix_args(form_data, obj_type):
+def parse_form_data_to_stix_args(form_data, obj_type, key_prefix): # <-- Add key_prefix here
     """
     Converts raw form data from Streamlit widgets into a dictionary suitable
     for stix2 library constructors or update methods.
@@ -636,10 +636,28 @@ def parse_form_data_to_stix_args(form_data, obj_type):
 
     # --- Parse Common Labels Field ---
     # Find the key for the labels text area (it includes the object type prefix)
-    labels_key = next((k for k in form_data if k.endswith('_labels_str')), None)
-    if labels_key and form_data.get(labels_key):
-        labels_list = parse_text_area(form_data[labels_key])
-        if labels_list: obj_args['labels'] = labels_list # Add if not empty
+    labels_key = next((k for k in form_data if k.endswith('_labels_str')), None)  # Level 2
+    labels_list = [] # Initialize as empty list                                     # Level 2
+
+    # Check if the labels text area key exists and has content typed by the user
+    if labels_key and form_data.get(labels_key):                                   # Level 2
+        # Parse the text area content into a list
+        labels_list = parse_text_area(form_data[labels_key])                       # Level 3 (Inside the 'if')
+
+    # Check the context (key_prefix) passed to the function
+    # If adding a new object ('add') AND the user didn't provide any labels
+    if key_prefix == "add" and not labels_list:                                    # Level 2
+            # Add the default label to the arguments for the stix2 library
+            obj_args['labels'] = ["bridewell-cti"]                                    # Level 3 (Inside the 'if')
+    # Else if the user DID provide labels (either when adding or editing)
+    elif labels_list:                                                              # Level 2
+            # Add the user-provided labels to the arguments
+            obj_args['labels'] = labels_list                                          # Level 3 (Inside the 'elif')
+    # Else (means we are editing AND the user provided no labels),
+    # we simply do nothing, ensuring the 'labels' key is NOT added to obj_args.
+    # This correctly removes the labels property if cleared during an edit.
+
+    # --- Type Specific Parsing --- # <<< Make sure this line follows immediately after the block above (Level 2)
 
     # --- Type Specific Parsing ---
     # Parse fields based on the object type
@@ -1129,7 +1147,7 @@ with st.sidebar:
                     # Generate a new STIX ID
                     obj_id = f"{add_obj_type}--{uuid.uuid4()}"
                     # Parse the form data into arguments suitable for stix2 library
-                    obj_args = parse_form_data_to_stix_args(add_form_data, add_obj_type)
+                    obj_args = parse_form_data_to_stix_args(add_form_data, add_obj_type, "add") # Pass "add"
                     # Ensure the generated ID is included
                     obj_args['id'] = obj_id
                     try:
