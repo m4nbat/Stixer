@@ -43,7 +43,7 @@ HARDCODED_VALID_RELATIONSHIPS = {
     ('identity', 'location'): ['located-at'], ('indicator', 'attack-pattern'): ['indicates'],
     ('indicator', 'campaign'): ['indicates'], ('indicator', 'infrastructure'): ['indicates'],
     ('indicator', 'intrusion-set'): ['indicates'], ('indicator', 'malware'): ['indicates'],
-    ('indicator', 'threat-actor'): ['indicates'], ('indicator', 'tool'): ['indicates'],
+    ('indicator', 'threat-actor'): ['indicates'], ('indicator', 'tool'): ['indicates'], ('indicator', 'email-addr'): ['indicates'],
     ('indicator', 'observed-data'): ['based-on'],
     ('infrastructure', 'infrastructure'): ['communicates-with', 'consists-of', 'controls', 'uses'],
     ('infrastructure', 'ipv4-addr'): ['communicates-with'], ('infrastructure', 'ipv6-addr'): ['communicates-with'],
@@ -439,11 +439,32 @@ def generate_object_form_fields(obj_type, obj_data=None, key_prefix="add"):
         form_values['id_sectors'] = st.multiselect("Sectors", options=INDUSTRY_SECTOR_OV[1:], default=data.get('sectors', []), key=f"{key_prefix}_id_sectors")
         form_values['id_contact_information'] = st.text_input("Contact Information", value=_get_default(data, 'contact_information'), key=f"{key_prefix}_id_contact")
     elif obj_type == 'indicator': # UPDATED
-        form_values['ind_indicator_types'] = st.multiselect("Indicator Types", options=INDICATOR_TYPES_OV[1:], default=data.get('indicator_types', []), key=f"{key_prefix}_ind_types")
-        form_values['ind_pattern_type'] = st.selectbox("Pattern Type (Required)", options=PATTERN_TYPES_OV, index=PATTERN_TYPES_OV.index(_get_default(data, 'pattern_type', "stix")), key=f"{key_prefix}_ind_patt_type")
-        form_values['ind_pattern'] = st.text_area("Pattern (Required)", value=_get_default(data, 'pattern'), key=f"{key_prefix}_ind_pattern")
-        datetime_input("Valid From", "valid_from", required=True); datetime_input("Valid Until", "valid_until")
-        kill_chain_input("ind") # Add kill chain input specific to indicator
+         # --- Filter default indicator types ---
+         standard_options = INDICATOR_TYPES_OV[1:] # Options allowed by the standard list
+         current_types = data.get('indicator_types', []) # Get types from the object data
+         # Keep only the types from the object that are also in the standard options list
+         valid_defaults = [t for t in current_types if t in standard_options]
+         # Identify any non-standard types present in the object's data
+         non_standard_types = [t for t in current_types if t not in standard_options]
+         # --- End filtering ---
+
+         # Use the filtered 'valid_defaults' for the multiselect default
+         form_values['ind_indicator_types'] = st.multiselect(
+             "Indicator Types",
+             options=standard_options,
+             default=valid_defaults, # Pass the filtered list here
+             key=f"{key_prefix}_ind_types"
+         )
+
+         # --- Display warning if non-standard types were found ---
+         if non_standard_types:
+             st.warning(f"Note: This object contains non-standard Indicator Types: `{'`, `'.join(non_standard_types)}`. Please update to standard values from the list above.")
+         # --- End warning ---
+
+         form_values['ind_pattern_type'] = st.selectbox("Pattern Type (Required)", options=PATTERN_TYPES_OV, index=PATTERN_TYPES_OV.index(_get_default(data, 'pattern_type', "stix")), key=f"{key_prefix}_ind_patt_type")
+         form_values['ind_pattern'] = st.text_area("Pattern (Required)", value=_get_default(data, 'pattern'), key=f"{key_prefix}_ind_pattern")
+         datetime_input("Valid From", "valid_from", required=True); datetime_input("Valid Until", "valid_until")
+         kill_chain_input("ind") # Add kill chain input specific to indicator
     elif obj_type == 'infrastructure': # UPDATED
         form_values['inf_infrastructure_types'] = st.multiselect("Infrastructure Types", options=INFRASTRUCTURE_TYPES_OV[1:], default=data.get('infrastructure_types', []), key=f"{key_prefix}_inf_types")
         form_values['inf_aliases_str'] = st.text_area("Aliases (one per line)", value=_list_to_text(data, 'aliases'), key=f"{key_prefix}_inf_aliases")
@@ -1795,4 +1816,3 @@ if st.session_state.current_selection and isinstance(st.session_state.current_se
     elif len(selected_nodes) > 1 or len(selected_edges) > 1 or (selected_nodes and selected_edges):
         # Message if multiple elements are selected
         st.info(f"Multiple elements selected ({len(selected_nodes)} nodes, {len(selected_edges)} edges). Select a single element to view details.")
-
